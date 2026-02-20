@@ -1,0 +1,43 @@
+mode = "DEMO"
+exchange = "binance-futures-usdtm"
+symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+
+[endpoints]
+ws_demo = "wss://stream.binancefuture.com/ws"
+ws_real = "wss://fstream.binance.com/ws"
+rest_demo = "https://testnet.binancefuture.com"
+rest_real = "https://fapi.binance.com"
+
+[risk]
+max_daily_loss_pct = 3.0
+max_trade_risk_pct = 0.5
+max_positions = 3
+max_leverage = 5
+max_notional_per_trade = 250.0
+cooldown_seconds = 45
+
+[strategy]
+impulse_threshold_pct = 3.0
+impulse_window_seconds = 60
+volume_zscore_threshold = 2.0
+exhaustion_ratio_threshold = 0.4
+retrace_target_pct = [0.3, 0.6]
+stop_loss_model = "ATR"
+take_profit_model = "dynamic_retrace"
+hard_time_stop_seconds = 120
+
+[execution]
+order_type = "MARKET"
+max_slippage_bps = 8.0
+min_orderbook_depth = 50000
+spread_guard_bps = 15.0
+dry_run = true
+
+[ui]
+dark_mode = true
+refresh_ms = 200
+sound_notifications = true
+
+[storage]
+sqlite_path = "data/danbot.sqlite3"
+csv_dir = "data/exports"

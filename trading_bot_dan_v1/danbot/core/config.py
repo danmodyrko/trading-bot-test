@@ -26,7 +26,13 @@ class StrategyConfig(BaseModel):
     impulse_threshold_pct: float = 3.0
     impulse_window_seconds: int = 60
     volume_zscore_threshold: float = 2.0
+    trade_rate_burst_threshold: float = 8.0
     exhaustion_ratio_threshold: float = 0.4
+    exhaustion_confidence_threshold: float = 0.55
+    vol_kill_threshold: float = 0.02
+    vol_cooldown_seconds: int = 30
+    regime_filter_enabled: bool = True
+    trend_strength_threshold: float = 1.4
     retrace_target_pct: tuple[float, float] = (0.3, 0.6)
     stop_loss_model: Literal["ATR", "fixed"] = "ATR"
     take_profit_model: Literal["dynamic_retrace", "fixed"] = "dynamic_retrace"
@@ -36,9 +42,11 @@ class StrategyConfig(BaseModel):
 class ExecutionConfig(BaseModel):
     order_type: Literal["MARKET", "LIMIT"] = "MARKET"
     max_slippage_bps: float = 8.0
+    edge_safety_factor: float = 0.7
     min_orderbook_depth: float = 50000
     spread_guard_bps: float = 15.0
     dry_run: bool = True
+    enable_real_orders: bool = False
 
 
 class UiConfig(BaseModel):
@@ -63,6 +71,10 @@ class AppConfig(BaseModel):
     mode: Mode = Mode.DEMO
     exchange: str = "binance-futures-usdtm"
     symbols: list[str] = Field(default_factory=lambda: ["BTCUSDT", "ETHUSDT", "SOLUSDT"])
+    auto_discover_symbols: bool = True
+    min_quote_volume_24h: float = 5_000_000
+    min_trade_rate_baseline: float = 1.0
+    max_symbols_active: int = 100
     endpoints: Endpoints
     risk: RiskConfig = Field(default_factory=RiskConfig)
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)

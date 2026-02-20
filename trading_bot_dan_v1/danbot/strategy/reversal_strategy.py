@@ -3,9 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from danbot.core.config import StrategyConfig
-from danbot.strategy.impulse_detector import detect_impulse
 from danbot.strategy.signals import StrategySignal
-from danbot.strategy.state_machine import ImpulseLifecycleMachine, MarketState
+from danbot.strategy.state_machine import MarketState, ProbabilisticStateMachine
 
 
 @dataclass
@@ -13,30 +12,34 @@ class ReversalStrategy:
     config: StrategyConfig
 
     def __post_init__(self) -> None:
-        self.machine_by_symbol: dict[str, ImpulseLifecycleMachine] = {}
+        self.machine_by_symbol: dict[str, ProbabilisticStateMachine] = {}
 
-    def evaluate(self, symbol: str, features: dict[str, float], imbalance_factor: float, structure_confirmed: bool) -> StrategySignal:
-        machine = self.machine_by_symbol.setdefault(symbol, ImpulseLifecycleMachine())
-        impulse = detect_impulse(
-            price_change_pct=features.get("return_pct", 0.0),
-            seconds=60,
-            volume_z=features.get("volume_zscore", 0.0),
-            imbalance_factor=imbalance_factor,
-            threshold_pct=self.config.impulse_threshold_pct,
+    def evaluate(self, symbol: str, features: dict[str, float], structure_confirmed: bool, regime_ok: bool = True) -> StrategySignal:
+        machine = self.machine_by_symbol.setdefault(symbol, ProbabilisticStateMachine())
+        conf = machine.update(
+            impulse_score=features.get("impulse_score", 0.0),
+            impulse_detected=bool(features.get("impulse_detected", False)),
+            exhaustion_detected=bool(features.get("exhaustion_detected", False)),
+            exhaustion_ratio=features.get("exhaustion_ratio", 1.0),
+            wick_proxy=features.get("wick_proxy", 0.0),
+            structure_confirmed=structure_confirmed,
         )
-        exhaustion = (
-            features.get("exhaustion_ratio", 1.0) < self.config.exhaustion_ratio_threshold
-            and features.get("wick_ratio", 0.0) > 1.2
-        )
-        climax = impulse.detected and abs(features.get("return_pct", 0.0)) > self.config.impulse_threshold_pct * 1.2
-        rebalance = abs(features.get("return_pct", 0.0)) < 0.5
-        state = machine.transition(impulse.detected, climax, exhaustion, rebalance)
-
+        state = machine.current_state
         reasons: list[str] = []
         side = None
-        confidence = min(1.0, max(0.0, impulse.score))
-        if state == MarketState.EXHAUSTION and structure_confirmed:
-            side = "SELL" if features.get("return_pct", 0) > 0 else "BUY"
-            reasons.extend(["exhaustion", "first_structure_confirmed"])
-            confidence = min(1.0, confidence + 0.2)
-        return StrategySignal(symbol=symbol, state=state, confidence=confidence, side=side, reason_codes=reasons, features=features)
+        impulse_falling = conf[MarketState.IMPULSE] < 0.35
+        if not regime_ok:
+            reasons.append("regime_filter_block")
+        if conf[MarketState.EXHAUSTION] > self.config.exhaustion_confidence_threshold and impulse_falling and structure_confirmed and regime_ok:
+            side = "SELL" if features.get("price_change_pct", 0) > 0 else "BUY"
+            reasons.extend(["exhaustion_confident", "impulse_falling", "structure_confirmed"])
+        elif conf[MarketState.EXHAUSTION] <= self.config.exhaustion_confidence_threshold:
+            reasons.append("exhaustion_low_confidence")
+        return StrategySignal(
+            symbol=symbol,
+            state=state,
+            confidence=conf[state],
+            side=side,
+            reason_codes=reasons,
+            features={**features, **{f"conf_{s.value}": v for s, v in conf.items()}},
+        )

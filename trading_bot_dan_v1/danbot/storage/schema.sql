@@ -39,3 +39,23 @@ CREATE TABLE IF NOT EXISTS incidents (
   message TEXT NOT NULL,
   details TEXT
 );
+
+CREATE TABLE IF NOT EXISTS lifelog (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  category TEXT NOT NULL,
+  symbol TEXT,
+  message TEXT NOT NULL,
+  reason_codes TEXT,
+  json_metrics TEXT
+);
+
+CREATE TABLE IF NOT EXISTS health_metrics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  latency_ms REAL,
+  stale_flag INTEGER,
+  positions_count INTEGER,
+  daily_loss_pct REAL
+);

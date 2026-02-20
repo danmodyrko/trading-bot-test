@@ -6,11 +6,13 @@ Binance USDT-M futures scalper with tick-domain impulse/exhaustion detection, pr
 ```bat
 run.bat
 ```
+`run.bat` first tries `uv`, and if `uv` is unavailable it automatically falls back to a local `.venv` + `pip` workflow.
 
 ## Quick start (Linux/macOS)
 ```bash
 ./run.sh
 ```
+`run.sh` also falls back to `.venv` + `pip` if `uv` is not installed.
 
 ## UV direct commands
 ```bash

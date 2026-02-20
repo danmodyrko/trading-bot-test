@@ -1,47 +1,51 @@
 # Trading Bot Dan v1
 
-Production-style Binance Futures impulse lifecycle scalper with desktop UI, journaling, backtest, and paper/real execution safety gates.
+Binance USDT-M futures scalper with tick-domain impulse/exhaustion detection, probabilistic state machine, dynamic symbol discovery, LiveLog, and safety circuit breakers.
 
-## Features
-- Event-driven strategy lifecycle: `BUILDUP → IMPULSE → CLIMAX → EXHAUSTION → REBALANCE`
-- Entry only during exhaustion + first structure confirmation.
-- DEMO vs REAL separation with persistent mode badge and REAL confirmation gate.
-- Risk controls: daily loss circuit breaker, position cap, slippage/spread/depth guards, dry-run mode.
-- SQLite journaling for signals/trades/incidents + CSV export utility.
-- Backtest/replay modules for strategy validation.
-
-## Installation
-```bash
-cd trading_bot_dan_v1
-python -m venv .venv
-. .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -e .[dev]
-cp .env.example .env
+## Quick start (Windows)
+```bat
+run.bat
 ```
 
-## Run UI
+## Quick start (Linux/macOS)
 ```bash
-python -m danbot.main
+./run.sh
 ```
 
-## Run headless
+## UV direct commands
 ```bash
-python -m danbot.main --headless
+uv sync
+uv run python -m danbot.main
+uv run python -m danbot.main --headless
 ```
 
-## DEMO vs REAL
-- `mode = "DEMO"` routes to testnet-compatible endpoints and supports paper simulation.
-- `mode = "REAL"` uses live endpoints and should only be enabled after UI confirmation (type `REAL`, check acknowledgement, 10 second arming countdown).
-- Keep `execution.dry_run = true` until fully validated.
+## Modes
+- **DEMO**: paper simulator path works without API keys.
+- **REAL**: requires typing `REAL`, checking acknowledgement, and 10-second countdown in UI.
+- **DRY-RUN**: default ON. Even in REAL, no orders are sent unless explicitly enabled.
 
-## Config
-All runtime controls are in `config.toml`: symbols, websocket/rest endpoints, risk, strategy, execution, UI refresh, and storage paths.
-Secrets (`BINANCE_API_KEY`, `BINANCE_API_SECRET`) must be provided via environment variables.
+## API keys
+Create `.env` and set your keys if you want exchange execution:
+```env
+BINANCE_API_KEY=...
+BINANCE_API_SECRET=...
+```
 
-## Troubleshooting (Windows-first)
-- If PySide6 fails, install latest Visual C++ runtime and retry pip install.
-- If websocket disconnects frequently, check firewall/proxy and lower symbol count.
-- Bot blocks new trades when feed is stale and logs incident records.
+## Dynamic symbol discovery
+At startup the bot queries Binance `exchangeInfo` + `ticker/24hr`, includes all USDT perpetual symbols in TRADING state passing liquidity filters, and enforces `max_symbols_active` (default 100). Remaining symbols are watch-only.
 
-## Disclaimer
-Not financial advice. You are solely responsible for all trading decisions and losses. Validate in DEMO/paper mode first.
+## Safety guards
+- Global kill switch (`Ctrl+K`)
+- Daily loss, max positions, staleness, volatility, spread and slippage guards
+- Cost-vs-edge rejection using expected slippage model
+- Regime filter ON by default (reversal disabled in trend regime)
+
+## Troubleshooting websockets
+- If stream heartbeat is stale the bot blocks new entries and logs incidents.
+- Connectivity issues automatically trigger reconnect with backoff.
+- In environments without Binance access, use `--headless` demo/paper simulation.
+
+## Optional Windows EXE build
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build_windows_exe.ps1
+```

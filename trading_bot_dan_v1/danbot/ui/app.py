@@ -1,164 +1,181 @@
 from __future__ import annotations
 
-from collections import deque
+import functools
+from datetime import datetime, timezone
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import (
-    QApplication,
-    QCheckBox,
-    QComboBox,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QListWidget,
-    QMainWindow,
-    QMessageBox,
-    QPushButton,
-    QTabWidget,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QMainWindow, QVBoxLayout, QWidget
 
-from danbot.core.config import AppConfig, Mode
-from danbot.ui.theme import DARK_QSS
-from danbot.ui.widgets import SymbolCard
+from danbot.core.config import AppConfig
+from danbot.ui.engine_worker import EngineWorker
+from danbot.ui.theme import ACCENT_BLUE, ACCENT_GOLD, ACCENT_GREEN, ACCENT_RED, DARK_QSS, GAP, OUTER_PADDING, PRIMARY_BG
+from danbot.ui.viewmodels import DashboardState, LiveLogEntry, LiveLogModel
+from danbot.ui.widgets_glass import GlassButton, GlassCard, LiveLogPanel, MetricCard, PillBadge, StrategyPanel
 
-try:
-    import pyqtgraph as pg
-except Exception:  # pragma: no cover
-    pg = None
+
+def safe_slot(handler):
+    @functools.wraps(handler)
+    def wrapper(self: MainWindow, *args, **kwargs):
+        try:
+            return handler(self, *args, **kwargs)
+        except Exception as exc:  # pragma: no cover
+            self._append_log(
+                LiveLogEntry(
+                    ts_iso=datetime.now(timezone.utc).isoformat(),
+                    severity="INCIDENT",
+                    category="INCIDENT",
+                    symbol=None,
+                    message=f"UI handler error: {exc}",
+                )
+            )
+
+    return wrapper
 
 
 class MainWindow(QMainWindow):
     def __init__(self, config: AppConfig) -> None:
         super().__init__()
         self.config = config
-        self.setWindowTitle("Trading Bot Dan v1")
-        self.resize(1300, 820)
-        self.health_points: deque[float] = deque(maxlen=300)
-        self.mode_armed = False
+        self.worker: EngineWorker | None = None
+        self.blocked = False
+        self.log_model = LiveLogModel()
+        self.pending_refresh = False
+        self.state = DashboardState(mode=config.mode.value, dry_run=config.execution.dry_run, risk_pct=config.risk.max_trade_risk_pct)
+
+        self.setWindowTitle("Dan v1 Dashboard")
+        self.setFixedSize(1440, 820)
+        self.setStyleSheet(f"background: {PRIMARY_BG};")
 
         root = QWidget()
         self.setCentralWidget(root)
-        layout = QVBoxLayout(root)
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(OUTER_PADDING, OUTER_PADDING, OUTER_PADDING, OUTER_PADDING)
+        outer.setSpacing(GAP)
 
-        top = QHBoxLayout()
-        self.mode_badge = QLabel(f"{config.mode.value} | {'DRY-RUN' if config.execution.dry_run else 'LIVE-ORDERS'}")
-        self.mode_badge.setObjectName("badge_demo" if config.mode == Mode.DEMO else "badge_real")
-        self.kill_button = QPushButton("GLOBAL KILL SWITCH (Ctrl+K)")
-        self.kill_button.setObjectName("danger")
-        self.start_button = QPushButton("Start")
-        self.stop_button = QPushButton("Stop")
-        top.addWidget(self.mode_badge)
-        top.addStretch()
-        top.addWidget(self.start_button)
-        top.addWidget(self.stop_button)
-        top.addWidget(self.kill_button)
-        layout.addLayout(top)
+        outer.addWidget(self._build_top_bar())
 
-        QShortcut(QKeySequence("Ctrl+K"), self, activated=self._kill_switch)
-        self.kill_button.clicked.connect(self._kill_switch)
+        middle = QHBoxLayout()
+        middle.setSpacing(GAP)
+        self.strategy_panel = StrategyPanel()
+        strategy_card = GlassCard("Strategy")
+        strategy_card.set_content(self.strategy_panel)
 
-        tabs = QTabWidget()
-        tabs.addTab(self._live_tab(), "Live Monitor")
-        tabs.addTab(QWidget(), "Strategy Diagnostics")
-        tabs.addTab(QWidget(), "Backtest/Replay")
-        tabs.addTab(self._settings_tab(), "Settings")
-        layout.addWidget(tabs)
+        self.log_panel = LiveLogPanel()
+        log_card = GlassCard("Live Log")
+        log_card.set_content(self.log_panel)
 
-    def _live_tab(self) -> QWidget:
-        page = QWidget()
-        l = QVBoxLayout(page)
+        middle.addWidget(strategy_card, 32)
+        middle.addWidget(log_card, 68)
+        outer.addLayout(middle, 1)
 
-        cards = QHBoxLayout()
-        for s in self.config.symbols:
-            cards.addWidget(SymbolCard(s))
-        l.addLayout(cards)
+        metrics = QHBoxLayout()
+        metrics.setSpacing(GAP)
+        self.winrate = MetricCard("24h Win Rate", "--", ACCENT_GREEN, "signal.svg")
+        self.drawdown = MetricCard("24h Drawdown", "--", ACCENT_RED, "risk_event.svg")
+        self.profit = MetricCard("24h Profit", "--", ACCENT_GOLD, "execute.svg")
+        self.uptime = MetricCard("Bot Uptime", "00:00:00", ACCENT_BLUE, "ws.svg")
+        metrics.addWidget(self.winrate)
+        metrics.addWidget(self.drawdown)
+        metrics.addWidget(self.profit)
+        metrics.addWidget(self.uptime)
+        outer.addLayout(metrics)
 
-        self.chart = None
-        if pg:
-            self.chart = pg.PlotWidget(title="Bot Health & Activity (last 10m)")
-            self.chart.setYRange(0, 200)
-            self.chart_curve = self.chart.plot(pen="y")
-            l.addWidget(self.chart)
-            timer = QTimer(self)
-            timer.timeout.connect(self._refresh_chart)
-            timer.start(500)
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self._flush_logs)
+        self.refresh_timer.start(200)
 
-        fl = QHBoxLayout()
-        self.category_filter = QComboBox()
-        self.category_filter.addItems(["ALL", "INFO", "SIGNAL", "RISK", "INCIDENT"])
-        self.symbol_filter = QComboBox()
-        self.symbol_filter.addItems(["ALL", *self.config.symbols])
-        self.log_search = QLineEdit()
-        self.log_search.setPlaceholderText("Search log...")
-        fl.addWidget(self.category_filter)
-        fl.addWidget(self.symbol_filter)
-        fl.addWidget(self.log_search)
-        l.addLayout(fl)
+        self.log_panel.search.textChanged.connect(self._schedule_refresh)
+        self.log_panel.severity.currentTextChanged.connect(self._schedule_refresh)
 
-        self.lifelog = QListWidget()
-        l.addWidget(self.lifelog)
-        return page
+    def _build_top_bar(self) -> QWidget:
+        bar = QWidget()
+        l = QHBoxLayout(bar)
+        l.setContentsMargins(0, 0, 0, 0)
+        l.setSpacing(10)
 
-    def _settings_tab(self) -> QWidget:
-        page = QWidget()
-        l = QVBoxLayout(page)
-        l.addWidget(QLabel("REAL mode confirmation gate"))
-        self.real_text = QLineEdit()
-        self.real_text.setPlaceholderText('Type "REAL"')
-        self.real_ack = QCheckBox("I understand real capital risk")
-        self.enable_live_orders = QCheckBox("Enable live order submission (dry-run off)")
-        self.regime_toggle = QCheckBox("Regime Filter ON")
-        self.regime_toggle.setChecked(True)
-        btn = QPushButton("Enable REAL Trading")
-        btn.clicked.connect(self._confirm_real)
-        l.addWidget(self.real_text)
-        l.addWidget(self.real_ack)
-        l.addWidget(self.enable_live_orders)
-        l.addWidget(self.regime_toggle)
-        l.addWidget(btn)
+        self.badge_mode = PillBadge("demo.svg", "DEMO MODE", ACCENT_GREEN)
+        self.badge_dry = PillBadge("dryrun.svg", "DRY RUN", ACCENT_GOLD)
+        self.badge_ws = PillBadge("ws.svg", "WS OK 0ms", ACCENT_BLUE)
+        self.badge_risk = PillBadge("risk.svg", f"RISK {self.state.risk_pct:.2f}%", ACCENT_RED)
+        l.addWidget(self.badge_mode)
+        l.addWidget(self.badge_dry)
+        l.addWidget(self.badge_ws)
+        l.addWidget(self.badge_risk)
+        l.addStretch()
 
-        l.addWidget(QLabel("Universe Controls"))
-        self.search_symbols = QLineEdit()
-        self.search_symbols.setPlaceholderText("Search symbol")
-        self.auto_refresh_toggle = QCheckBox("Auto-refresh universe")
-        self.auto_refresh_toggle.setChecked(True)
-        l.addWidget(self.search_symbols)
-        l.addWidget(self.auto_refresh_toggle)
-        return page
+        self.start_btn = GlassButton("START", "primary")
+        self.stop_btn = GlassButton("STOP", "secondary")
+        self.kill_btn = GlassButton("KILL SWITCH", "danger")
+        self.start_btn.clicked.connect(self.on_start)
+        self.stop_btn.clicked.connect(self.on_stop)
+        self.kill_btn.clicked.connect(self.on_kill)
+        l.addWidget(self.start_btn)
+        l.addWidget(self.stop_btn)
+        l.addWidget(self.kill_btn)
+        return bar
 
-    def _refresh_chart(self) -> None:
-        if not self.chart:
+    def _apply_state(self, state: DashboardState) -> None:
+        self.strategy_panel.symbol.setText(state.strategy_symbol)
+        self.strategy_panel.impulse_val.setText(f"{state.impulse_score:.2f}")
+        self.strategy_panel.progress.setValue(int(state.impulse_score * 100))
+        self.strategy_panel.spread.setText(f"Spread {state.spread_bps:.1f} bps")
+        self.strategy_panel.spread_value.setText(f"{state.spread_bps:.1f}")
+        self.strategy_panel.status.setText(state.strategy_status)
+        self.badge_ws.layout().itemAt(1).widget().setText(f"WS OK {state.ws_latency_ms:.0f}ms")
+
+        self.winrate.set_value("--" if state.metrics_24h_winrate is None else f"{state.metrics_24h_winrate:.1f}%")
+        self.drawdown.set_value("--" if state.metrics_24h_drawdown is None else f"{state.metrics_24h_drawdown:.1f}%")
+        self.profit.set_value("--" if state.metrics_24h_profit is None else f"${state.metrics_24h_profit:,.0f}")
+        hours, rem = divmod(state.bot_uptime_seconds, 3600)
+        minutes, seconds = divmod(rem, 60)
+        self.uptime.set_value(f"{hours:02}:{minutes:02}:{seconds:02}")
+
+    @safe_slot
+    def on_start(self) -> None:
+        if self.worker and self.worker.isRunning():
             return
-        self.health_points.append(20 + (len(self.health_points) % 30))
-        self.chart_curve.setData(list(self.health_points))
+        self.blocked = False
+        self.worker = EngineWorker(self.state)
+        self.worker.state_update.connect(self._on_worker_state)
+        self.worker.log_event.connect(self._append_log)
+        self.worker.start()
+        self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INFO", "INFO", None, "engine start", {}))
 
-    def append_lifelog(self, severity: str, message: str) -> None:
-        self.lifelog.addItem(f"[{severity}] {message}")
+    @safe_slot
+    def on_stop(self) -> None:
+        if self.worker and self.worker.isRunning():
+            self.worker.request_stop()
+            self.worker.wait(2000)
+            self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INFO", "INFO", None, "engine stop requested", {}))
 
-    def _kill_switch(self) -> None:
-        QMessageBox.critical(self, "Kill Switch", "Global kill switch activated. New entries blocked.")
-        self.append_lifelog("RISK", "Kill switch activated")
+    @safe_slot
+    def on_kill(self) -> None:
+        self.blocked = True
+        if self.worker and self.worker.isRunning():
+            self.worker.emergency_kill()
+            self.worker.wait(1000)
+        self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INCIDENT", "INCIDENT", None, "KILL SWITCH: trading blocked", {}))
 
-    def _confirm_real(self) -> None:
-        if self.real_text.text() != "REAL" or not self.real_ack.isChecked():
-            QMessageBox.warning(self, "Blocked", "Confirmation gate failed")
+    def _on_worker_state(self, state: DashboardState) -> None:
+        self.state = state
+        self._apply_state(state)
+
+    def _append_log(self, entry: LiveLogEntry) -> None:
+        self.log_model.append(entry)
+        self.pending_refresh = True
+
+    def _schedule_refresh(self) -> None:
+        self.pending_refresh = True
+
+    def _flush_logs(self) -> None:
+        if not self.pending_refresh:
             return
-        self.countdown = 10
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self._countdown_real)
-        self.timer.start(1000)
-
-    def _countdown_real(self) -> None:
-        if self.countdown <= 0:
-            self.timer.stop()
-            self.mode_armed = True
-            QMessageBox.information(self, "Armed", "REAL mode armed")
-            return
-        self.statusBar().showMessage(f"REAL mode arming in {self.countdown}s")
-        self.countdown -= 1
+        self.pending_refresh = False
+        rows = self.log_model.get_filtered(
+            self.log_panel.severity.currentText(),
+            self.log_panel.search.text(),
+        )
+        self.log_panel.set_entries(rows)
 
 
 def launch_ui(config: AppConfig) -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QColor, QGuiApplication, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -20,8 +20,11 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSpinBox,
     QDoubleSpinBox,
-    QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTextEdit,
+    QDialog,
+    QMenu,
     QVBoxLayout,
     QWidget,
 )
@@ -124,29 +127,48 @@ class LiveLogPanel(QWidget):
     def __init__(self) -> None:
         super().__init__()
         root = QVBoxLayout(self)
-        controls = QHBoxLayout()
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Search")
-        self.severity = QComboBox()
-        self.severity.addItems(["ALL", "INFO", "SIGNAL", "EXECUTE", "RISK", "EXIT", "INCIDENT"])
-        controls.addWidget(self.search, 1)
-        controls.addWidget(self.severity)
-        root.addLayout(controls)
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.log_host = QWidget()
-        self.log_layout = QVBoxLayout(self.log_host)
-        self.log_layout.addStretch()
-        self.scroll.setWidget(self.log_host)
-        root.addWidget(self.scroll, 1)
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Severity", "Message", "Time"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
+        self.table.cellDoubleClicked.connect(lambda *_: self.copy_selected())
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.horizontalHeader().setSectionResizeMode(1, self.table.horizontalHeader().ResizeMode.Stretch)
+        self.table.setColumnWidth(0, 120)
+        self.table.setColumnWidth(2, 130)
+        QShortcut(QKeySequence.StandardKey.Copy, self.table, activated=self.copy_selected)
+        root.addWidget(self.table, 1)
 
     def set_entries(self, entries: list[LiveLogEntry]) -> None:
-        while self.log_layout.count() > 1:
-            item = self.log_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        for entry in entries:
-            self.log_layout.insertWidget(self.log_layout.count() - 1, LogRow(entry))
+        self.table.setRowCount(len(entries))
+        for row, entry in enumerate(entries):
+            severity = QTableWidgetItem(entry.severity.upper())
+            message = QTableWidgetItem(entry.message)
+            ts = QTableWidgetItem(entry.ts_iso[11:19])
+            self.table.setItem(row, 0, severity)
+            self.table.setItem(row, 1, message)
+            self.table.setItem(row, 2, ts)
+        if entries:
+            self.table.scrollToBottom()
+
+    def copy_selected(self) -> None:
+        row = self.table.currentRow()
+        if row < 0:
+            return
+        severity = self.table.item(row, 0).text() if self.table.item(row, 0) else ""
+        message = self.table.item(row, 1).text() if self.table.item(row, 1) else ""
+        ts = self.table.item(row, 2).text() if self.table.item(row, 2) else ""
+        QGuiApplication.clipboard().setText(f"[{ts}] {severity}: {message}")
+
+    def _show_context_menu(self, pos) -> None:
+        menu = QMenu(self)
+        action = menu.addAction("Copy")
+        action.triggered.connect(self.copy_selected)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
 
 
 class MetricCard(QWidget):
@@ -197,8 +219,16 @@ class SettingsPanel(QWidget):
         actions.addWidget(self.save_btn)
         actions.addWidget(self.apply_btn)
         self.form_root.addLayout(actions)
+        self.connection_status = QLabel("Connection test status: idle")
+        self.connection_status.setStyleSheet(f"color: {TEXT_MUTED};")
+        self.form_root.addWidget(self.connection_status)
         scroll.setWidget(host)
         root.addWidget(scroll)
+
+    def set_connection_status(self, text: str, is_error: bool = False) -> None:
+        color = ACCENT_RED if is_error else ACCENT_GREEN
+        self.connection_status.setStyleSheet(f"color: {color}; font-weight: 600;")
+        self.connection_status.setText(text)
 
     def _build_mode(self) -> None:
         group = QGroupBox("Mode & Safety")
@@ -350,8 +380,15 @@ class SettingsPanel(QWidget):
         self.form_root.addWidget(group)
 
 
-class DashboardTabs(QTabWidget):
-    def __init__(self, log_panel: QWidget, settings_panel: QWidget) -> None:
-        super().__init__()
-        self.addTab(log_panel, "Live Log")
-        self.addTab(settings_panel, "Settings")
+class SettingsWindow(QDialog):
+    def __init__(self, settings_panel: SettingsPanel, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Dan v1 Settings")
+        self.setMinimumSize(960, 700)
+        layout = QVBoxLayout(self)
+        layout.addWidget(settings_panel)
+        controls = QHBoxLayout()
+        controls.addStretch()
+        self.close_btn = GlassButton("Close")
+        controls.addWidget(self.close_btn)
+        layout.addLayout(controls)

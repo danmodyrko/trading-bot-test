@@ -1,8 +1,55 @@
-DARK_QSS = """
-QWidget { background: #0f172a; color: #e2e8f0; font-family: Segoe UI; }
-QGroupBox { border: 1px solid #1e293b; border-radius: 10px; margin-top: 8px; padding: 8px; }
-QPushButton { background: #1d4ed8; border-radius: 6px; padding: 6px 10px; }
-QPushButton#danger { background: #b91c1c; }
-QLabel#badge_demo { background:#0f766e; padding:4px 8px; border-radius:8px; }
-QLabel#badge_real { background:#b91c1c; padding:4px 8px; border-radius:8px; }
+from __future__ import annotations
+
+PRIMARY_BG = "#0B1220"
+GLASS = "rgba(255,255,255,0.06)"
+GLASS_STRONG = "rgba(255,255,255,0.10)"
+BORDER = "rgba(255,255,255,0.12)"
+TEXT_MAIN = "#E6EDF7"
+TEXT_MUTED = "rgba(230,237,247,0.65)"
+ACCENT_GREEN = "#39D98A"
+ACCENT_RED = "#FF5A5F"
+ACCENT_GOLD = "#F6C453"
+ACCENT_BLUE = "#5AA9FF"
+
+CARD_RADIUS = 22
+PILL_RADIUS = 18
+BTN_RADIUS = 14
+
+OUTER_PADDING = 20
+GAP = 16
+INNER_PADDING = 18
+
+FONT_STACK = "Inter, 'Segoe UI'"
+
+DARK_QSS = f"""
+QWidget {{
+    background-color: {PRIMARY_BG};
+    color: {TEXT_MAIN};
+    font-family: {FONT_STACK};
+    font-size: 14px;
+}}
+QLineEdit, QComboBox {{
+    background: rgba(255,255,255,0.07);
+    border: 1px solid {BORDER};
+    border-radius: 12px;
+    padding: 8px 10px;
+    color: {TEXT_MAIN};
+}}
+QLineEdit:focus, QComboBox:focus {{
+    border: 1px solid rgba(90,169,255,0.85);
+}}
+QScrollArea {{
+    border: none;
+    background: transparent;
+}}
+QScrollBar:vertical {{
+    background: transparent;
+    width: 10px;
+    margin: 2px;
+}}
+QScrollBar::handle:vertical {{
+    background: rgba(255,255,255,0.24);
+    border-radius: 5px;
+    min-height: 30px;
+}}
 """

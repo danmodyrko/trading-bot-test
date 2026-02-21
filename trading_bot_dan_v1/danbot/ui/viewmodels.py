@@ -1,40 +1,55 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 
 
-@dataclass
-class SymbolCardVM:
-    symbol: str
-    price: float = 0.0
-    state: str = "BUILDUP"
-    confidence: float = 0.0
-    pnl: float = 0.0
+@dataclass(slots=True)
+class DashboardState:
+    mode: str = "DEMO"
+    dry_run: bool = True
+    ws_latency_ms: float = 0.0
+    risk_pct: float = 1.0
+    strategy_symbol: str = "61464 BTC/USDT"
     impulse_score: float = 0.0
-    exhaustion_ratio: float = 1.0
-    classifier_label: str = "-"
-    classifier_confidence: float = 0.0
-    expected_slippage_bps: float = 0.0
     spread_bps: float = 0.0
-    vol_10s: float = 0.0
-    regime_status: str = "MEAN_REVERSION"
-    decision: str = "WAIT"
+    strategy_status: str = "Decay Detected"
+    metrics_24h_winrate: float | None = None
+    metrics_24h_drawdown: float | None = None
+    metrics_24h_profit: float | None = None
+    bot_uptime_seconds: int = 0
 
 
-@dataclass
-class LogEntryVM:
-    ts: str
+@dataclass(slots=True)
+class LiveLogEntry:
+    ts_iso: str
     severity: str
     category: str
-    symbol: str
+    symbol: str | None
     message: str
+    metrics: dict[str, float] = field(default_factory=dict)
 
 
-@dataclass
-class AppVM:
-    mode: str
-    dry_run: bool = True
-    connected: bool = False
-    latency_ms: int = 0
-    cards: dict[str, SymbolCardVM] = field(default_factory=dict)
-    logs: list[LogEntryVM] = field(default_factory=list)
+class LiveLogModel:
+    def __init__(self, max_entries: int = 1000) -> None:
+        self._entries: deque[LiveLogEntry] = deque(maxlen=max_entries)
+
+    def append(self, entry: LiveLogEntry) -> None:
+        self._entries.append(entry)
+
+    def get_filtered(self, severity: str = "ALL", search_text: str = "") -> list[LiveLogEntry]:
+        severity_upper = severity.upper().strip()
+        search = search_text.lower().strip()
+        out: list[LiveLogEntry] = []
+        for e in self._entries:
+            if severity_upper != "ALL" and e.severity.upper() != severity_upper:
+                continue
+            haystack = f"{e.category} {e.symbol or ''} {e.message}".lower()
+            if search and search not in haystack:
+                continue
+            out.append(e)
+        return out
+
+    @property
+    def entries(self) -> list[LiveLogEntry]:
+        return list(self._entries)

@@ -3,13 +3,11 @@ setlocal
 
 where python >nul 2>nul || (echo Python 3.11+ required & exit /b 1)
 
-set "UV_CMD=uv"
-where uv >nul 2>nul
-if %ERRORLEVEL% neq 0 (
-  echo Installing uv...
-  python -m pip install --user uv || exit /b 1
-  set "UV_CMD=python -m uv"
+if not exist .venv (
+  python -m venv .venv || exit /b 1
 )
 
-%UV_CMD% sync || exit /b 1
-%UV_CMD% run python -m danbot.main
+call .venv\Scripts\activate.bat || exit /b 1
+python -m pip install --upgrade pip || exit /b 1
+pip install -r requirements.txt || exit /b 1
+python -m danbot.main

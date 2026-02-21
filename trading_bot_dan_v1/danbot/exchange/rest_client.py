@@ -19,7 +19,7 @@ class BinanceRestClient:
         query = urlencode(params)
         return hmac.new(self.api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
 
-    async def get(self, path: str, params: dict[str, Any] | None = None, signed: bool = False) -> dict[str, Any]:
+    async def get(self, path: str, params: dict[str, Any] | None = None, signed: bool = False) -> Any:
         params = params or {}
         if signed:
             params["timestamp"] = int(time.time() * 1000)

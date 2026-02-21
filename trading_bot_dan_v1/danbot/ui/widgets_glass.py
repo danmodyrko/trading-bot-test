@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QFormLayout,
@@ -184,6 +185,7 @@ class SettingsPanel(QWidget):
         self.form_root = QVBoxLayout(host)
         self.form_root.setSpacing(12)
         self._build_mode()
+        self._build_presets()
         self._build_keys()
         self._build_risk()
         self._build_strategy()
@@ -213,6 +215,61 @@ class SettingsPanel(QWidget):
         form.addRow("Kill switch", self.kill_status)
         self.form_root.addWidget(group)
 
+    def _build_presets(self) -> None:
+        group = QGroupBox("Risk Presets")
+        root = QVBoxLayout(group)
+        root.setSpacing(8)
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.preset_group = QButtonGroup(self)
+        self.preset_buttons: dict[str, QPushButton] = {}
+        presets = [
+            ("SAFE", "0.5% | 3x | 1 pos"),
+            ("MEDIUM", "1% | 5x | 2 pos"),
+            ("AGGRESSIVE", "2% | 8x | 3 pos"),
+            ("INSANE", "4% | 15x | 5 pos"),
+        ]
+        for name, headline in presets:
+            btn = QPushButton(f"{name}\n{headline}")
+            btn.setCheckable(True)
+            btn.setMinimumHeight(52)
+            btn.setStyleSheet(
+                "QPushButton {"
+                f"background: {GLASS_STRONG}; color: {TEXT_MAIN}; border: 1px solid {BORDER};"
+                "border-radius: 12px; padding: 6px 10px; font-weight: 700; text-align: left;"
+                "}"
+                "QPushButton:checked {border: 1px solid #4CE6A0; background: rgba(71,230,152,0.18);}"
+            )
+            self.preset_buttons[name] = btn
+            self.preset_group.addButton(btn)
+            row.addWidget(btn)
+        self.custom_indicator = QLabel("CUSTOM")
+        self.custom_indicator.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.custom_indicator.setMinimumHeight(52)
+        self.custom_indicator.setStyleSheet(
+            f"background: {GLASS_STRONG}; color: {TEXT_MUTED}; border: 1px solid {BORDER}; border-radius: 12px; font-weight: 700;"
+        )
+        row.addWidget(self.custom_indicator)
+        root.addLayout(row)
+        self.active_profile_label = QLabel("Active profile: CUSTOM")
+        self.active_profile_label.setStyleSheet(f"color: {TEXT_MUTED}; font-weight: 600;")
+        root.addWidget(self.active_profile_label)
+        self.form_root.addWidget(group)
+
+    def set_active_profile(self, profile: str) -> None:
+        for name, btn in self.preset_buttons.items():
+            btn.setChecked(name == profile)
+        is_custom = profile == "CUSTOM"
+        if is_custom:
+            self.custom_indicator.setStyleSheet(
+                "background: rgba(255,190,92,0.18); color: #ffd99b; border: 1px solid rgba(255,190,92,0.5); border-radius: 12px; font-weight: 700;"
+            )
+        else:
+            self.custom_indicator.setStyleSheet(
+                f"background: {GLASS_STRONG}; color: {TEXT_MUTED}; border: 1px solid {BORDER}; border-radius: 12px; font-weight: 700;"
+            )
+        self.active_profile_label.setText(f"Active profile: {profile}")
+
     def _build_keys(self) -> None:
         group = QGroupBox("API Keys")
         grid = QGridLayout(group)
@@ -231,18 +288,32 @@ class SettingsPanel(QWidget):
     def _build_risk(self) -> None:
         group = QGroupBox("Trade / Risk Settings")
         form = QFormLayout(group)
-        self.order_value = QDoubleSpinBox(); self.order_value.setMaximum(1_000_000)
+        self.order_value = QDoubleSpinBox(); self.order_value.setDecimals(4); self.order_value.setSingleStep(0.001); self.order_value.setMaximum(1)
         self.max_lev = QSpinBox(); self.max_lev.setMaximum(125)
         self.max_pos = QSpinBox(); self.max_pos.setMaximum(100)
-        self.max_loss = QDoubleSpinBox(); self.max_loss.setMaximum(100)
+        self.max_loss = QDoubleSpinBox(); self.max_loss.setDecimals(4); self.max_loss.setMaximum(1)
         self.cooldown = QSpinBox(); self.cooldown.setMaximum(3600)
         self.spread = QDoubleSpinBox(); self.spread.setMaximum(1000)
         self.slippage = QDoubleSpinBox(); self.slippage.setMaximum(1000)
+        self.edge_gate = QDoubleSpinBox(); self.edge_gate.setDecimals(2); self.edge_gate.setMaximum(10)
         self.vol_kill = QDoubleSpinBox(); self.vol_kill.setDecimals(4); self.vol_kill.setMaximum(10)
         self.regime = QCheckBox("Enable")
         self.regime_thr = QDoubleSpinBox(); self.regime_thr.setMaximum(10)
         self.max_tph = QSpinBox(); self.max_tph.setMaximum(1000)
-        for lbl, w in [("Order Value", self.order_value), ("Max Leverage", self.max_lev), ("Max positions", self.max_pos), ("Max daily loss %", self.max_loss), ("Cooldown sec", self.cooldown), ("Spread guard bps", self.spread), ("Max slippage bps", self.slippage), ("Vol kill threshold", self.vol_kill), ("Regime filter", self.regime), ("Regime threshold", self.regime_thr), ("Max trades/hour", self.max_tph)]:
+        for lbl, w in [
+            ("Order value (% balance)", self.order_value),
+            ("Max Leverage", self.max_lev),
+            ("Max positions", self.max_pos),
+            ("Max daily loss pct", self.max_loss),
+            ("Cooldown sec", self.cooldown),
+            ("Spread guard bps", self.spread),
+            ("Max slippage bps", self.slippage),
+            ("Edge gate factor", self.edge_gate),
+            ("Vol 10s threshold", self.vol_kill),
+            ("Regime filter", self.regime),
+            ("Trend strength threshold", self.regime_thr),
+            ("Max trades/hour", self.max_tph),
+        ]:
             form.addRow(lbl, w)
         self.form_root.addWidget(group)
 
@@ -252,12 +323,10 @@ class SettingsPanel(QWidget):
         self.impulse_pct = QDoubleSpinBox(); self.impulse_pct.setMaximum(100)
         self.impulse_window = QSpinBox(); self.impulse_window.setMaximum(3600)
         self.exhaustion = QDoubleSpinBox(); self.exhaustion.setMaximum(10)
-        self.tp1 = QDoubleSpinBox(); self.tp1.setMaximum(1); self.tp1.setSingleStep(0.05)
-        self.tp2 = QDoubleSpinBox(); self.tp2.setMaximum(1); self.tp2.setSingleStep(0.05)
-        self.tp3 = QDoubleSpinBox(); self.tp3.setMaximum(1); self.tp3.setSingleStep(0.05)
+        self.tp_profile = QLineEdit(); self.tp_profile.setPlaceholderText("0.30,0.50,0.60")
         self.time_stop = QSpinBox(); self.time_stop.setMaximum(7200)
         self.stop_model = QComboBox(); self.stop_model.addItems(["ATR", "fixed"])
-        for lbl, w in [("impulse_threshold_pct", self.impulse_pct), ("impulse_window_seconds", self.impulse_window), ("exhaustion_ratio_threshold", self.exhaustion), ("TP1", self.tp1), ("TP2", self.tp2), ("TP3", self.tp3), ("time stop sec", self.time_stop), ("stop model", self.stop_model)]:
+        for lbl, w in [("impulse_threshold_pct", self.impulse_pct), ("impulse_window_seconds", self.impulse_window), ("exhaustion_ratio_threshold", self.exhaustion), ("tp_profile", self.tp_profile), ("time stop sec", self.time_stop), ("stop model", self.stop_model)]:
             form.addRow(lbl, w)
         self.form_root.addWidget(group)
 

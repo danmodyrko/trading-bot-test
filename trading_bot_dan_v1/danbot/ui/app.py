@@ -6,7 +6,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QThread, QTimer, Signal
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QMainWindow, QVBoxLayout, QWidget
 
 from danbot.core.config import AppConfig, AppState, Mode, load_app_state, save_app_state
@@ -16,7 +17,25 @@ from danbot.storage.db import Database
 from danbot.ui.engine_worker import EngineWorker
 from danbot.ui.theme import ACCENT_BLUE, ACCENT_GOLD, ACCENT_GREEN, ACCENT_RED, DARK_QSS, GAP, OUTER_PADDING, PRIMARY_BG
 from danbot.ui.viewmodels import LiveLogEntry, LiveLogModel
-from danbot.ui.widgets_glass import DashboardTabs, GlassButton, LiveLogPanel, MetricCard, PillBadge, SettingsPanel
+from danbot.ui.widgets_glass import GlassButton, LiveLogPanel, MetricCard, PillBadge, SettingsPanel, SettingsWindow, svg_pixmap
+
+
+class ConnectionTestWorker(QThread):
+    finished_result = Signal(object)
+
+    def __init__(self, mode: Mode, key: str, secret: str) -> None:
+        super().__init__()
+        self.mode = mode
+        self.key = key
+        self.secret = secret
+
+    def run(self) -> None:
+        adapter = ExchangeAdapter(mode=self.mode, api_key=self.key, api_secret=self.secret)
+        try:
+            overview = asyncio.run(adapter.get_account_overview())
+            self.finished_result.emit((self.mode, True, overview, ""))
+        except Exception as exc:
+            self.finished_result.emit((self.mode, False, {}, str(exc)))
 
 
 def safe_slot(handler):
@@ -43,6 +62,7 @@ class MainWindow(QMainWindow):
         self._updating_form = False
         self._custom_log_emitted = False
         self._preset_baseline = self._current_profile_values(self.app_state)
+        self._connection_workers: list[ConnectionTestWorker] = []
 
         self.setWindowTitle("Dan v1 Dashboard")
         self.setFixedSize(1440, 820)
@@ -57,10 +77,12 @@ class MainWindow(QMainWindow):
         outer.addWidget(self._build_top_bar())
 
         self.log_panel = LiveLogPanel()
+        outer.addWidget(self.log_panel, 1)
+
         self.settings = SettingsPanel()
+        self.settings_window = SettingsWindow(self.settings, self)
+        self.settings_window.close_btn.clicked.connect(self.settings_window.close)
         self._bind_settings()
-        self.tabs = DashboardTabs(self.log_panel, self.settings)
-        outer.addWidget(self.tabs, 1)
 
         metrics = QHBoxLayout()
         metrics.setSpacing(GAP)
@@ -68,7 +90,7 @@ class MainWindow(QMainWindow):
         self.drawdown = MetricCard("24h Drawdown", "--", ACCENT_RED)
         self.profit = MetricCard("24h Profit", "--", ACCENT_GOLD)
         self.uptime = MetricCard("Bot Uptime", "00:00:00", ACCENT_BLUE)
-        self.balance = MetricCard("Current Balance (USDT)", "NOT CONFIGURED", ACCENT_BLUE)
+        self.balance = MetricCard("Current Balance", "NOT CONFIGURED", ACCENT_BLUE)
         for c in [self.winrate, self.drawdown, self.profit, self.uptime, self.balance]:
             metrics.addWidget(c)
         outer.addLayout(metrics)
@@ -76,8 +98,6 @@ class MainWindow(QMainWindow):
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self._flush_logs)
         self.refresh_timer.start(200)
-        self.log_panel.search.textChanged.connect(self._schedule_refresh)
-        self.log_panel.severity.currentTextChanged.connect(self._schedule_refresh)
 
         self.latency_timer = QTimer(self)
         self.latency_timer.timeout.connect(self._refresh_latency_badge)
@@ -100,12 +120,16 @@ class MainWindow(QMainWindow):
         self.start_btn = GlassButton("START", "primary")
         self.stop_btn = GlassButton("STOP")
         self.kill_btn = GlassButton("KILL SWITCH", "danger")
+        self.settings_btn = GlassButton("SETTINGS")
+        self.settings_btn.setIcon(QIcon(svg_pixmap("gear.svg", 14, ACCENT_BLUE)))
         self.start_btn.clicked.connect(self.on_start)
         self.stop_btn.clicked.connect(self.on_stop)
         self.kill_btn.clicked.connect(self.on_kill)
+        self.settings_btn.clicked.connect(self.on_open_settings)
         l.addWidget(self.start_btn)
         l.addWidget(self.stop_btn)
         l.addWidget(self.kill_btn)
+        l.addWidget(self.settings_btn)
         return bar
 
     def _bind_settings(self) -> None:
@@ -145,10 +169,6 @@ class MainWindow(QMainWindow):
             self.settings.ml_toggle,
             self.settings.ml_threshold,
             self.settings.model_path,
-            self.settings.demo_key,
-            self.settings.demo_secret,
-            self.settings.real_key,
-            self.settings.real_secret,
         ]
         for widget in widgets:
             signal = getattr(widget, "valueChanged", None) or getattr(widget, "textChanged", None) or getattr(widget, "currentTextChanged", None) or getattr(widget, "stateChanged", None) or getattr(widget, "toggled", None)
@@ -257,8 +277,7 @@ class MainWindow(QMainWindow):
         self._custom_log_emitted = False
         self._set_form_from_state(self.app_state)
         self.on_save_settings()
-        snapshot = {k: self._preset_baseline[k] for k in ("order_value_pct_balance", "max_leverage", "max_positions", "max_daily_loss_pct")}
-        self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INFO", "INFO", None, f"Preset applied: {preset_name}", snapshot))
+        self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INFO", "INFO", None, f"Preset applied: {preset_name}", {}))
 
     def _credentials_for_mode(self, mode: Mode) -> tuple[str, str]:
         if mode == Mode.DEMO:
@@ -285,15 +304,33 @@ class MainWindow(QMainWindow):
         self.badge_mode.text_lbl.setText(f"{self.app_state.mode.value} MODE")
         self.badge_dry.text_lbl.setText("DRY RUN ON" if self.app_state.dry_run else "DRY RUN OFF")
 
+    @safe_slot
     def _test_connection(self, mode: Mode) -> None:
-        self._save_env()
         key, secret = self._credentials_for_mode(mode)
-        adapter = ExchangeAdapter(mode=mode, api_key=key, api_secret=secret)
-        try:
-            asyncio.run(adapter.get_account_overview())
-            self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INFO", "INFO", None, f"{mode.value} API connection success", {}))
-        except Exception as exc:
-            self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INCIDENT", "INCIDENT", None, f"{mode.value} API connection failed: {exc}", {}))
+        self.settings.set_connection_status(f"Testing {mode.value} API...", is_error=False)
+        worker = ConnectionTestWorker(mode, key, secret)
+        worker.finished_result.connect(self._on_connection_test_done)
+        worker.finished.connect(lambda: self._connection_workers.remove(worker) if worker in self._connection_workers else None)
+        self._connection_workers.append(worker)
+        worker.start()
+
+    @safe_slot
+    def _on_connection_test_done(self, result: tuple[Mode, bool, dict[str, float | int], str]) -> None:
+        mode, ok, overview, error = result
+        if ok:
+            msg = f"{mode.value} API connection success | balance={overview.get('balance_usdt', 0):.2f} available={overview.get('available_usdt', 0):.2f}"
+            self.settings.set_connection_status(msg, is_error=False)
+            self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INFO", "INFO", None, msg, {}))
+        else:
+            msg = f"{mode.value} API connection failed: {error}"
+            self.settings.set_connection_status(msg, is_error=True)
+            self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INCIDENT", "INCIDENT", None, msg, {}))
+
+    @safe_slot
+    def on_open_settings(self) -> None:
+        self.settings_window.show()
+        self.settings_window.raise_()
+        self.settings_window.activateWindow()
 
     @safe_slot
     def on_start(self) -> None:
@@ -356,15 +393,11 @@ class MainWindow(QMainWindow):
     def _refresh_latency_badge(self) -> None:
         self.pending_refresh = True
 
-    def _schedule_refresh(self) -> None:
-        self.pending_refresh = True
-
     def _flush_logs(self) -> None:
         if not self.pending_refresh:
             return
         self.pending_refresh = False
-        rows = self.log_model.get_filtered(self.log_panel.severity.currentText(), self.log_panel.search.text())
-        self.log_panel.set_entries(rows)
+        self.log_panel.set_entries(self.log_model.entries)
 
 
 def launch_ui(config: AppConfig) -> None:

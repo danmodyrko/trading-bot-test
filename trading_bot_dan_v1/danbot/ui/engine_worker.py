@@ -39,8 +39,6 @@ class EngineWorker(QThread):
             await self._refresh_latency()
             if tick % 2 == 0:
                 await self._refresh_balance()
-            if tick % 3 == 0:
-                self._refresh_trade_metrics()
             self._pull_lifelog_events()
             self.state_update.emit(self._state)
             await asyncio.sleep(1)

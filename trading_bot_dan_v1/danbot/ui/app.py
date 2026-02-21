@@ -10,6 +10,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QMainWindow, QVBoxLayout, QWidget
 
 from danbot.core.config import AppConfig, AppState, Mode, load_app_state, save_app_state
+from danbot.core.presets import PRESETS, apply_preset, detect_profile
 from danbot.exchange.adapter import ExchangeAdapter
 from danbot.storage.db import Database
 from danbot.ui.engine_worker import EngineWorker
@@ -39,6 +40,9 @@ class MainWindow(QMainWindow):
         self.worker: EngineWorker | None = None
         self.log_model = LiveLogModel(max_entries=2000)
         self.pending_refresh = False
+        self._updating_form = False
+        self._custom_log_emitted = False
+        self._preset_baseline = self._current_profile_values(self.app_state)
 
         self.setWindowTitle("Dan v1 Dashboard")
         self.setFixedSize(1440, 820)
@@ -99,40 +103,162 @@ class MainWindow(QMainWindow):
         self.start_btn.clicked.connect(self.on_start)
         self.stop_btn.clicked.connect(self.on_stop)
         self.kill_btn.clicked.connect(self.on_kill)
-        l.addWidget(self.start_btn); l.addWidget(self.stop_btn); l.addWidget(self.kill_btn)
+        l.addWidget(self.start_btn)
+        l.addWidget(self.stop_btn)
+        l.addWidget(self.kill_btn)
         return bar
 
     def _bind_settings(self) -> None:
-        s = self.settings
-        s.mode_combo.setCurrentText(self.app_state.mode.value)
-        s.dry_run.setChecked(self.app_state.dry_run)
-        s.kill_status.setText("ENGAGED" if self.app_state.kill_switch_engaged else "OFF")
-        s.order_value.setValue(self.app_state.order_value_usdt)
-        s.max_lev.setValue(self.app_state.max_leverage)
-        s.max_pos.setValue(self.app_state.max_positions_open)
-        s.max_loss.setValue(self.app_state.max_daily_loss_pct)
-        s.cooldown.setValue(self.app_state.cooldown_seconds_per_symbol)
-        s.spread.setValue(self.app_state.spread_guard_bps)
-        s.slippage.setValue(self.app_state.max_slippage_bps)
-        s.vol_kill.setValue(self.app_state.volatility_kill_switch_threshold)
-        s.regime.setChecked(self.app_state.regime_filter_enabled)
-        s.regime_thr.setValue(self.app_state.regime_threshold)
-        s.max_tph.setValue(self.app_state.max_trades_per_hour)
-        s.impulse_pct.setValue(self.app_state.impulse_threshold_pct)
-        s.impulse_window.setValue(self.app_state.impulse_window_seconds)
-        s.exhaustion.setValue(self.app_state.exhaustion_ratio_threshold)
-        s.tp1.setValue(self.app_state.tp1_pct); s.tp2.setValue(self.app_state.tp2_pct); s.tp3.setValue(self.app_state.tp3_pct)
-        s.time_stop.setValue(self.app_state.time_stop_seconds)
-        s.stop_model.setCurrentText(self.app_state.stop_model)
-        s.spike_toggle.setChecked(self.app_state.spike_classifier_enabled)
-        s.ml_toggle.setChecked(self.app_state.ml_gate_enabled)
-        s.ml_threshold.setValue(self.app_state.ml_threshold)
-        s.model_path.setText(self.app_state.ml_model_path)
+        self._load_env_into_form()
+        self._set_form_from_state(self.app_state)
+        self.settings.save_btn.clicked.connect(self.on_save_settings)
+        self.settings.apply_btn.clicked.connect(self.on_save_settings)
+        self.settings.test_demo_btn.clicked.connect(lambda: self._test_connection(Mode.DEMO))
+        self.settings.test_real_btn.clicked.connect(lambda: self._test_connection(Mode.REAL))
+        for name, btn in self.settings.preset_buttons.items():
+            btn.clicked.connect(lambda _=False, preset=name: self.on_apply_preset(preset))
+        self._connect_auto_custom_tracking()
 
-        s.save_btn.clicked.connect(self.on_save_settings)
-        s.apply_btn.clicked.connect(self.on_save_settings)
-        s.test_demo_btn.clicked.connect(lambda: self._test_connection(Mode.DEMO))
-        s.test_real_btn.clicked.connect(lambda: self._test_connection(Mode.REAL))
+    def _connect_auto_custom_tracking(self) -> None:
+        widgets = [
+            self.settings.mode_combo,
+            self.settings.dry_run,
+            self.settings.order_value,
+            self.settings.max_lev,
+            self.settings.max_pos,
+            self.settings.max_loss,
+            self.settings.cooldown,
+            self.settings.spread,
+            self.settings.slippage,
+            self.settings.edge_gate,
+            self.settings.vol_kill,
+            self.settings.regime,
+            self.settings.regime_thr,
+            self.settings.max_tph,
+            self.settings.impulse_pct,
+            self.settings.impulse_window,
+            self.settings.exhaustion,
+            self.settings.tp_profile,
+            self.settings.time_stop,
+            self.settings.stop_model,
+            self.settings.spike_toggle,
+            self.settings.ml_toggle,
+            self.settings.ml_threshold,
+            self.settings.model_path,
+            self.settings.demo_key,
+            self.settings.demo_secret,
+            self.settings.real_key,
+            self.settings.real_secret,
+        ]
+        for widget in widgets:
+            signal = getattr(widget, "valueChanged", None) or getattr(widget, "textChanged", None) or getattr(widget, "currentTextChanged", None) or getattr(widget, "stateChanged", None) or getattr(widget, "toggled", None)
+            if signal is not None:
+                signal.connect(self._on_manual_setting_change)
+
+    def _load_env_into_form(self) -> None:
+        self.settings.demo_key.setText(os.getenv("BINANCE_TESTNET_API_KEY", ""))
+        self.settings.demo_secret.setText(os.getenv("BINANCE_TESTNET_API_SECRET", ""))
+        self.settings.real_key.setText(os.getenv("BINANCE_API_KEY", ""))
+        self.settings.real_secret.setText(os.getenv("BINANCE_API_SECRET", ""))
+
+    def _set_form_from_state(self, state: AppState) -> None:
+        s = self.settings
+        self._updating_form = True
+        s.mode_combo.setCurrentText(state.mode.value)
+        s.dry_run.setChecked(state.dry_run)
+        s.kill_status.setText("ENGAGED" if state.kill_switch_engaged else "OFF")
+        s.order_value.setValue(state.order_value_pct_balance)
+        s.max_lev.setValue(state.max_leverage)
+        s.max_pos.setValue(state.max_positions)
+        s.max_loss.setValue(state.max_daily_loss_pct)
+        s.cooldown.setValue(state.cooldown_seconds)
+        s.spread.setValue(state.spread_guard_bps)
+        s.slippage.setValue(state.max_slippage_bps)
+        s.edge_gate.setValue(state.edge_gate_factor)
+        s.vol_kill.setValue(state.vol_10s_threshold)
+        s.regime.setChecked(state.regime_filter_enabled)
+        s.regime_thr.setValue(state.trend_strength_threshold)
+        s.max_tph.setValue(state.max_trades_per_hour)
+        s.impulse_pct.setValue(state.impulse_threshold_pct)
+        s.impulse_window.setValue(state.impulse_window_seconds)
+        s.exhaustion.setValue(state.exhaustion_ratio_threshold)
+        s.tp_profile.setText(",".join(str(v) for v in state.tp_profile))
+        s.time_stop.setValue(state.time_stop_seconds)
+        s.stop_model.setCurrentText(state.stop_model)
+        s.spike_toggle.setChecked(state.spike_classifier_enabled)
+        s.ml_toggle.setChecked(state.ml_gate_enabled)
+        s.ml_threshold.setValue(state.ml_threshold)
+        s.model_path.setText(state.ml_model_path)
+        profile = state.active_profile if state.active_profile in PRESETS else detect_profile(state)
+        state.active_profile = profile
+        s.set_active_profile(profile)
+        self._updating_form = False
+
+    def _parse_tp_profile(self, raw: str) -> list[float]:
+        values = [chunk.strip() for chunk in raw.split(",") if chunk.strip()]
+        return [float(v) for v in values] if values else [0.3, 0.5, 0.6]
+
+    def _state_from_form(self) -> AppState:
+        return AppState(
+            mode=Mode(self.settings.mode_combo.currentText()),
+            dry_run=self.settings.dry_run.isChecked(),
+            kill_switch_engaged=self.app_state.kill_switch_engaged,
+            active_profile=self.settings.active_profile_label.text().replace("Active profile: ", ""),
+            order_value_pct_balance=self.settings.order_value.value(),
+            max_leverage=self.settings.max_lev.value(),
+            max_positions=self.settings.max_pos.value(),
+            max_daily_loss_pct=self.settings.max_loss.value(),
+            cooldown_seconds=self.settings.cooldown.value(),
+            max_trades_per_hour=self.settings.max_tph.value(),
+            spread_guard_bps=self.settings.spread.value(),
+            max_slippage_bps=self.settings.slippage.value(),
+            edge_gate_factor=self.settings.edge_gate.value(),
+            vol_10s_threshold=self.settings.vol_kill.value(),
+            regime_filter_enabled=self.settings.regime.isChecked(),
+            trend_strength_threshold=self.settings.regime_thr.value(),
+            time_stop_seconds=self.settings.time_stop.value(),
+            tp_profile=self._parse_tp_profile(self.settings.tp_profile.text()),
+            impulse_threshold_pct=self.settings.impulse_pct.value(),
+            impulse_window_seconds=self.settings.impulse_window.value(),
+            exhaustion_ratio_threshold=self.settings.exhaustion.value(),
+            stop_model=self.settings.stop_model.currentText(),
+            spike_classifier_enabled=self.settings.spike_toggle.isChecked(),
+            ml_gate_enabled=self.settings.ml_toggle.isChecked(),
+            ml_threshold=self.settings.ml_threshold.value(),
+            ml_model_path=self.settings.model_path.text().strip(),
+        )
+
+    def _current_profile_values(self, state: AppState) -> dict[str, object]:
+        return {field: getattr(state, field) for field in PRESETS["SAFE"].keys()}
+
+    @safe_slot
+    def _on_manual_setting_change(self, *_args) -> None:
+        if self._updating_form:
+            return
+        current_state = self._state_from_form()
+        current_values = self._current_profile_values(current_state)
+        matched = detect_profile(current_state)
+        if matched != "CUSTOM":
+            self.settings.set_active_profile(matched)
+            self.app_state.active_profile = matched
+        elif current_values != self._preset_baseline:
+            self.settings.set_active_profile("CUSTOM")
+            self.app_state.active_profile = "CUSTOM"
+            if not self._custom_log_emitted:
+                self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INFO", "INFO", None, "Profile switched to CUSTOM (manual change)", {}))
+                self._custom_log_emitted = True
+        self.on_save_settings()
+
+    @safe_slot
+    def on_apply_preset(self, preset_name: str) -> None:
+        self.app_state = apply_preset(self.app_state, preset_name)
+        self.app_state.active_profile = preset_name
+        self._preset_baseline = self._current_profile_values(self.app_state)
+        self._custom_log_emitted = False
+        self._set_form_from_state(self.app_state)
+        self.on_save_settings()
+        snapshot = {k: self._preset_baseline[k] for k in ("order_value_pct_balance", "max_leverage", "max_positions", "max_daily_loss_pct")}
+        self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INFO", "INFO", None, f"Preset applied: {preset_name}", snapshot))
 
     def _save_env(self) -> None:
         lines = {
@@ -146,41 +272,14 @@ class MainWindow(QMainWindow):
 
     @safe_slot
     def on_save_settings(self) -> None:
-        self.app_state = AppState(
-            mode=Mode(self.settings.mode_combo.currentText()),
-            dry_run=self.settings.dry_run.isChecked(),
-            kill_switch_engaged=self.app_state.kill_switch_engaged,
-            order_value_usdt=self.settings.order_value.value(),
-            max_leverage=self.settings.max_lev.value(),
-            max_positions_open=self.settings.max_pos.value(),
-            max_daily_loss_pct=self.settings.max_loss.value(),
-            cooldown_seconds_per_symbol=self.settings.cooldown.value(),
-            spread_guard_bps=self.settings.spread.value(),
-            max_slippage_bps=self.settings.slippage.value(),
-            volatility_kill_switch_threshold=self.settings.vol_kill.value(),
-            regime_filter_enabled=self.settings.regime.isChecked(),
-            regime_threshold=self.settings.regime_thr.value(),
-            max_trades_per_hour=self.settings.max_tph.value(),
-            impulse_threshold_pct=self.settings.impulse_pct.value(),
-            impulse_window_seconds=self.settings.impulse_window.value(),
-            exhaustion_ratio_threshold=self.settings.exhaustion.value(),
-            tp1_pct=self.settings.tp1.value(),
-            tp2_pct=self.settings.tp2.value(),
-            tp3_pct=self.settings.tp3.value(),
-            time_stop_seconds=self.settings.time_stop.value(),
-            stop_model=self.settings.stop_model.currentText(),
-            spike_classifier_enabled=self.settings.spike_toggle.isChecked(),
-            ml_gate_enabled=self.settings.ml_toggle.isChecked(),
-            ml_threshold=self.settings.ml_threshold.value(),
-            ml_model_path=self.settings.model_path.text().strip(),
-        )
+        self.app_state = self._state_from_form()
         save_app_state(self.config.storage.app_state_path, self.app_state)
         self._save_env()
         self.badge_mode.text_lbl.setText(f"{self.app_state.mode.value} MODE")
         self.badge_dry.text_lbl.setText("DRY RUN ON" if self.app_state.dry_run else "DRY RUN OFF")
-        self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INFO", "INFO", None, "settings saved", {}))
 
     def _test_connection(self, mode: Mode) -> None:
+        self._save_env()
         key = os.getenv("BINANCE_TESTNET_API_KEY", "") if mode == Mode.DEMO else os.getenv("BINANCE_API_KEY", "")
         secret = os.getenv("BINANCE_TESTNET_API_SECRET", "") if mode == Mode.DEMO else os.getenv("BINANCE_API_SECRET", "")
         adapter = ExchangeAdapter(mode=mode, api_key=key, api_secret=secret)

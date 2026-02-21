@@ -12,6 +12,14 @@ run.bat
 ./run.sh
 ```
 
+## Windows `uv` not recognized?
+If `run.bat` shows `"uv" is not recognized`, it now falls back to `python -m uv` automatically after installation.
+You can also run manually:
+```bat
+python -m uv sync
+python -m uv run python -m danbot.main
+```
+
 ## UV direct commands
 ```bash
 uv sync

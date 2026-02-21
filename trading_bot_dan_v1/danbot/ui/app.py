@@ -260,6 +260,11 @@ class MainWindow(QMainWindow):
         snapshot = {k: self._preset_baseline[k] for k in ("order_value_pct_balance", "max_leverage", "max_positions", "max_daily_loss_pct")}
         self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INFO", "INFO", None, f"Preset applied: {preset_name}", snapshot))
 
+    def _credentials_for_mode(self, mode: Mode) -> tuple[str, str]:
+        if mode == Mode.DEMO:
+            return self.settings.demo_key.text().strip(), self.settings.demo_secret.text().strip()
+        return self.settings.real_key.text().strip(), self.settings.real_secret.text().strip()
+
     def _save_env(self) -> None:
         lines = {
             "BINANCE_TESTNET_API_KEY": self.settings.demo_key.text().strip(),
@@ -267,6 +272,8 @@ class MainWindow(QMainWindow):
             "BINANCE_API_KEY": self.settings.real_key.text().strip(),
             "BINANCE_API_SECRET": self.settings.real_secret.text().strip(),
         }
+        for key, value in lines.items():
+            os.environ[key] = value
         content = "\n".join(f"{k}={v}" for k, v in lines.items()) + "\n"
         Path(".env").write_text(content, encoding="utf-8")
 
@@ -280,8 +287,7 @@ class MainWindow(QMainWindow):
 
     def _test_connection(self, mode: Mode) -> None:
         self._save_env()
-        key = os.getenv("BINANCE_TESTNET_API_KEY", "") if mode == Mode.DEMO else os.getenv("BINANCE_API_KEY", "")
-        secret = os.getenv("BINANCE_TESTNET_API_SECRET", "") if mode == Mode.DEMO else os.getenv("BINANCE_API_SECRET", "")
+        key, secret = self._credentials_for_mode(mode)
         adapter = ExchangeAdapter(mode=mode, api_key=key, api_secret=secret)
         try:
             asyncio.run(adapter.get_account_overview())
@@ -298,14 +304,16 @@ class MainWindow(QMainWindow):
             return
         self.app_state.kill_switch_engaged = False
         save_app_state(self.config.storage.app_state_path, self.app_state)
+        demo_key, demo_secret = self._credentials_for_mode(Mode.DEMO)
+        real_key, real_secret = self._credentials_for_mode(Mode.REAL)
         self.worker = EngineWorker(
             self.config,
             self.app_state,
             self.db,
-            os.getenv("BINANCE_TESTNET_API_KEY", ""),
-            os.getenv("BINANCE_TESTNET_API_SECRET", ""),
-            os.getenv("BINANCE_API_KEY", ""),
-            os.getenv("BINANCE_API_SECRET", ""),
+            demo_key,
+            demo_secret,
+            real_key,
+            real_secret,
         )
         self.worker.state_update.connect(self._on_worker_state)
         self.worker.log_event.connect(self._append_log)

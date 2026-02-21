@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from danbot.core.config import Mode
@@ -14,6 +14,7 @@ class ExchangeAdapter:
     mode: Mode
     api_key: str
     api_secret: str
+    client: BinanceRestClient = field(init=False)
 
     def __post_init__(self) -> None:
         base_url = TESTNET_REST if self.mode == Mode.DEMO else LIVE_REST

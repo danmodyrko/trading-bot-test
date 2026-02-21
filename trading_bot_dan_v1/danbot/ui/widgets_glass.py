@@ -2,38 +2,30 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
+    QFormLayout,
     QFrame,
+    QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
-    QProgressBar,
     QScrollArea,
-    QSizePolicy,
+    QSpinBox,
+    QDoubleSpinBox,
+    QTabWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
-from danbot.ui.theme import (
-    ACCENT_BLUE,
-    ACCENT_GOLD,
-    ACCENT_GREEN,
-    ACCENT_RED,
-    BORDER,
-    BTN_RADIUS,
-    CARD_RADIUS,
-    GLASS,
-    GLASS_STRONG,
-    INNER_PADDING,
-    PILL_RADIUS,
-    TEXT_MAIN,
-    TEXT_MUTED,
-)
+from danbot.ui.theme import ACCENT_BLUE, ACCENT_GOLD, ACCENT_GREEN, ACCENT_RED, BORDER, BTN_RADIUS, CARD_RADIUS, GLASS, GLASS_STRONG, INNER_PADDING, PILL_RADIUS, TEXT_MAIN, TEXT_MUTED
 from danbot.ui.viewmodels import LiveLogEntry
 
 _ICON_CACHE: dict[tuple[str, int], QPixmap] = {}
@@ -58,22 +50,15 @@ def svg_pixmap(name: str, size: int = 16, color: str | None = None) -> QPixmap:
 
 
 class GlassCard(QWidget):
-    def __init__(self, title: str = "", controls: QWidget | None = None, accent: str | None = None) -> None:
+    def __init__(self, title: str = "") -> None:
         super().__init__()
-        self.accent = accent
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(INNER_PADDING, INNER_PADDING, INNER_PADDING, INNER_PADDING)
-        self.layout.setSpacing(12)
-
-        self.header = QHBoxLayout()
-        self.title_label = QLabel(title)
-        self.title_label.setStyleSheet(f"font-size: 18px; font-weight: 600; color: {TEXT_MAIN}; background: transparent;")
-        self.header.addWidget(self.title_label)
-        self.header.addStretch()
-        if controls:
-            self.header.addWidget(controls)
-        self.layout.addLayout(self.header)
+        self.layout.setSpacing(10)
+        if title:
+            self.title_label = QLabel(title)
+            self.title_label.setStyleSheet(f"font-size: 18px; font-weight: 600; color: {TEXT_MAIN};")
+            self.layout.addWidget(self.title_label)
 
     def set_content(self, widget: QWidget) -> None:
         self.layout.addWidget(widget)
@@ -82,26 +67,11 @@ class GlassCard(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = self.rect().adjusted(1, 1, -1, -1)
-
         path = QPainterPath()
         path.addRoundedRect(rect, CARD_RADIUS, CARD_RADIUS)
-
-        grad_top = QColor(255, 255, 255, 30)
-        grad_bottom = QColor(255, 255, 255, 10)
         painter.fillPath(path, QColor(GLASS))
-
         painter.setPen(QPen(QColor(BORDER), 1.0))
         painter.drawPath(path)
-
-        highlight = rect.adjusted(4, 2, -4, -rect.height() + 16)
-        painter.setPen(QPen(QColor(grad_top), 1.2))
-        painter.drawRoundedRect(highlight, CARD_RADIUS - 6, CARD_RADIUS - 6)
-
-        if self.accent:
-            painter.setPen(Qt.PenStyle.NoPen)
-            glow = rect.adjusted(20, 6, -20, -rect.height() + 20)
-            painter.setBrush(QColor(self.accent + "55"))
-            painter.drawRoundedRect(glow, 10, 10)
 
 
 class PillBadge(QWidget):
@@ -110,143 +80,42 @@ class PillBadge(QWidget):
         l = QHBoxLayout(self)
         l.setContentsMargins(12, 7, 12, 7)
         l.setSpacing(8)
-        self.setStyleSheet(
-            f"background: {GLASS_STRONG}; border: 1px solid {BORDER}; border-radius: {PILL_RADIUS}px;"
-        )
-        icon_lbl = QLabel()
-        icon_lbl.setPixmap(svg_pixmap(icon, 14, tint))
-        txt = QLabel(text)
-        txt.setStyleSheet(f"font-weight: 600; color: {TEXT_MAIN}; background: transparent;")
-        l.addWidget(icon_lbl)
-        l.addWidget(txt)
+        self.icon_lbl = QLabel()
+        self.icon_lbl.setPixmap(svg_pixmap(icon, 14, tint))
+        self.text_lbl = QLabel(text)
+        self.text_lbl.setStyleSheet(f"font-weight: 600; color: {TEXT_MAIN};")
+        self.setStyleSheet(f"background: {GLASS_STRONG}; border: 1px solid {BORDER}; border-radius: {PILL_RADIUS}px;")
+        l.addWidget(self.icon_lbl)
+        l.addWidget(self.text_lbl)
 
 
 class GlassButton(QPushButton):
     def __init__(self, text: str, variant: str = "secondary") -> None:
         super().__init__(text)
-        self.variant = variant
-        self.setMinimumHeight(44)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
         if variant == "primary":
-            style = f"background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #47E698, stop:1 #2ABF72); color: #07170f;"
+            style = "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #47E698, stop:1 #2ABF72); color: #07170f;"
         elif variant == "danger":
             style = "background: rgba(24,13,15,0.85); color: #ffd8da; border: 1px solid rgba(255,90,95,0.45);"
         else:
             style = f"background: {GLASS_STRONG}; color: {TEXT_MAIN};"
-        self.setStyleSheet(
-            f"QPushButton {{ {style} border: 1px solid {BORDER}; border-radius: {BTN_RADIUS}px; padding: 10px 16px; font-weight: 700; }}"
-            "QPushButton:disabled { opacity: 0.55; }"
-        )
-
-
-class StrategyPanel(QWidget):
-    def __init__(self) -> None:
-        super().__init__()
-        l = QVBoxLayout(self)
-        l.setContentsMargins(0, 0, 0, 0)
-        l.setSpacing(14)
-
-        symbol_row = QHBoxLayout()
-        coin = QLabel()
-        coin.setPixmap(svg_pixmap("btc.svg", 20))
-        self.symbol = QLabel("61464 BTC/USDT")
-        self.symbol.setStyleSheet("font-size: 24px; font-weight: 700;")
-        symbol_row.addWidget(coin)
-        symbol_row.addWidget(self.symbol)
-        symbol_row.addStretch()
-        l.addLayout(symbol_row)
-
-        row1 = QHBoxLayout()
-        row1.addWidget(QLabel("Impulse Score"))
-        row1.addStretch()
-        self.impulse_val = QLabel("0.00")
-        self.impulse_val.setStyleSheet("font-weight: 600;")
-        row1.addWidget(self.impulse_val)
-        l.addLayout(row1)
-
-        self.progress = QProgressBar()
-        self.progress.setTextVisible(False)
-        self.progress.setRange(0, 100)
-        self.progress.setFixedHeight(8)
-        self.progress.setStyleSheet(
-            f"QProgressBar{{background: rgba(255,255,255,0.09); border:none; border-radius:4px;}}"
-            f"QProgressBar::chunk{{background:{ACCENT_GREEN}; border-radius:4px;}}"
-        )
-        l.addWidget(self.progress)
-
-        spread_row = QHBoxLayout()
-        self.spread = QLabel("Spread 1.2 bps")
-        spread_row.addWidget(self.spread)
-        spread_row.addStretch()
-        self.spread_value = QLabel("1.2")
-        self.spread_value.setStyleSheet(f"color: {TEXT_MUTED};")
-        spread_row.addWidget(self.spread_value)
-        l.addLayout(spread_row)
-
-        self.status = QLabel("Decay Detected")
-        self.status.setStyleSheet(f"color:{TEXT_MUTED};")
-        l.addWidget(self.status)
-        l.addStretch()
-
-        self.enter_button = GlassButton("ENTER LONG", "primary")
-        self.enter_button.setEnabled(False)
-        l.addWidget(self.enter_button)
+        self.setStyleSheet(f"QPushButton {{ {style} border: 1px solid {BORDER}; border-radius: {BTN_RADIUS}px; padding: 10px 16px; font-weight: 700; }}")
+        self.setMinimumHeight(40)
 
 
 class LogRow(QFrame):
     def __init__(self, entry: LiveLogEntry) -> None:
         super().__init__()
-        self.setObjectName("logRow")
-        self.setStyleSheet(
-            f"QFrame#logRow{{background:transparent; border-radius:12px;}}"
-            "QFrame#logRow:hover{background:rgba(255,255,255,0.06);}"
-        )
         l = QHBoxLayout(self)
         l.setContentsMargins(10, 8, 10, 8)
-        l.setSpacing(10)
-
-        color_map = {
-            "SIGNAL": ACCENT_BLUE,
-            "EXECUTE": ACCENT_GREEN,
-            "RISK": ACCENT_RED,
-            "EXIT": ACCENT_GOLD,
-            "INCIDENT": ACCENT_RED,
-            "INFO": TEXT_MUTED,
-        }
-        icon_map = {
-            "SIGNAL": "signal.svg",
-            "EXECUTE": "execute.svg",
-            "RISK": "risk_event.svg",
-            "EXIT": "exit.svg",
-            "INCIDENT": "incident.svg",
-            "INFO": "signal.svg",
-        }
+        color_map = {"SIGNAL": ACCENT_BLUE, "EXECUTE": ACCENT_GREEN, "RISK": ACCENT_RED, "EXIT": ACCENT_GOLD, "INCIDENT": ACCENT_RED, "INFO": TEXT_MUTED}
         color = color_map.get(entry.category.upper(), ACCENT_BLUE)
-
-        icon = QLabel()
-        icon.setPixmap(svg_pixmap(icon_map.get(entry.category.upper(), "signal.svg"), 14, color))
-        l.addWidget(icon)
-
-        info = QVBoxLayout()
-        top = QHBoxLayout()
         tag = QLabel(entry.category.upper())
-        tag.setStyleSheet(f"color:{color}; font-weight:700;")
-        top.addWidget(tag)
-        if entry.symbol:
-            sym = QLabel(entry.symbol)
-            sym.setStyleSheet(f"color:{TEXT_MUTED};")
-            top.addWidget(sym)
-        top.addStretch()
-        info.addLayout(top)
-
+        tag.setStyleSheet(f"color:{color};font-weight:700;")
         msg = QLabel(entry.message)
-        msg.setWordWrap(True)
-        info.addWidget(msg)
-        l.addLayout(info, 1)
-
         ts = QLabel(entry.ts_iso[11:19])
         ts.setStyleSheet(f"color:{TEXT_MUTED};")
-        ts.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+        l.addWidget(tag)
+        l.addWidget(msg, 1)
         l.addWidget(ts)
 
 
@@ -254,27 +123,18 @@ class LiveLogPanel(QWidget):
     def __init__(self) -> None:
         super().__init__()
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(10)
-
-        control_row = QHBoxLayout()
+        controls = QHBoxLayout()
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search")
-        self.search.setFixedHeight(38)
         self.severity = QComboBox()
-        self.severity.addItems(["ALL", "SIGNAL", "EXECUTE", "RISK", "EXIT", "INCIDENT", "INFO"])
-        self.severity.setFixedHeight(38)
-        control_row.addWidget(self.search, 1)
-        control_row.addWidget(self.severity)
-        root.addLayout(control_row)
-
+        self.severity.addItems(["ALL", "INFO", "SIGNAL", "EXECUTE", "RISK", "EXIT", "INCIDENT"])
+        controls.addWidget(self.search, 1)
+        controls.addWidget(self.severity)
+        root.addLayout(controls)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.log_host = QWidget()
         self.log_layout = QVBoxLayout(self.log_host)
-        self.log_layout.setContentsMargins(0, 0, 0, 0)
-        self.log_layout.setSpacing(4)
         self.log_layout.addStretch()
         self.scroll.setWidget(self.log_host)
         root.addWidget(self.scroll, 1)
@@ -282,42 +142,147 @@ class LiveLogPanel(QWidget):
     def set_entries(self, entries: list[LiveLogEntry]) -> None:
         while self.log_layout.count() > 1:
             item = self.log_layout.takeAt(0)
-            w = item.widget()
-            if w:
-                w.deleteLater()
-        for entry in entries[-250:]:
+            if item.widget():
+                item.widget().deleteLater()
+        for entry in entries:
             self.log_layout.insertWidget(self.log_layout.count() - 1, LogRow(entry))
 
 
 class MetricCard(QWidget):
-    def __init__(self, title: str, value: str, accent: str, icon: str) -> None:
+    def __init__(self, title: str, value: str, accent: str) -> None:
         super().__init__()
-        self._accent = accent
         l = QVBoxLayout(self)
-        l.setContentsMargins(16, 14, 16, 14)
-        l.setSpacing(6)
-        top = QHBoxLayout()
-        ico = QLabel()
-        ico.setPixmap(svg_pixmap(icon, 16, accent))
-        top.addWidget(ico)
-        t = QLabel(title)
-        t.setStyleSheet(f"color:{TEXT_MUTED}; font-weight:600;")
-        top.addWidget(t)
-        top.addStretch()
-        l.addLayout(top)
-        self.value_label = QLabel(value)
-        self.value_label.setStyleSheet(f"font-size: 30px; font-weight: 700; color:{accent};")
-        l.addWidget(self.value_label)
+        l.setContentsMargins(12, 10, 12, 10)
+        self.title = QLabel(title)
+        self.title.setStyleSheet(f"color:{TEXT_MUTED};font-weight:600;")
+        self.value = QLabel(value)
+        self.value.setStyleSheet(f"font-size:26px;font-weight:700;color:{accent};")
+        l.addWidget(self.title)
+        l.addWidget(self.value)
 
     def set_value(self, value: str) -> None:
-        self.value_label.setText(value)
+        self.value.setText(value)
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = self.rect().adjusted(1, 1, -1, -1)
         path = QPainterPath()
-        path.addRoundedRect(rect, 18, 18)
+        path.addRoundedRect(rect, 16, 16)
         painter.fillPath(path, QColor(GLASS))
         painter.setPen(QPen(QColor(BORDER), 1.0))
         painter.drawPath(path)
+
+
+class SettingsPanel(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        root = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        host = QWidget()
+        self.form_root = QVBoxLayout(host)
+        self.form_root.setSpacing(12)
+        self._build_mode()
+        self._build_keys()
+        self._build_risk()
+        self._build_strategy()
+        self._build_ml()
+        actions = QHBoxLayout()
+        self.save_btn = GlassButton("Save", "primary")
+        self.apply_btn = GlassButton("Apply (no restart)")
+        actions.addStretch()
+        actions.addWidget(self.save_btn)
+        actions.addWidget(self.apply_btn)
+        self.form_root.addLayout(actions)
+        scroll.setWidget(host)
+        root.addWidget(scroll)
+
+    def _build_mode(self) -> None:
+        group = QGroupBox("Mode & Safety")
+        form = QFormLayout(group)
+        self.mode_combo = QComboBox(); self.mode_combo.addItems(["DEMO", "REAL"])
+        self.dry_run = QCheckBox("DRY RUN")
+        self.real_gate = QLineEdit(); self.real_gate.setPlaceholderText("Type REAL to unlock")
+        self.real_confirm = QCheckBox("I understand REAL mode risk")
+        self.kill_status = QLabel("OFF")
+        form.addRow("Mode", self.mode_combo)
+        form.addRow("", self.dry_run)
+        form.addRow("REAL gate", self.real_gate)
+        form.addRow("", self.real_confirm)
+        form.addRow("Kill switch", self.kill_status)
+        self.form_root.addWidget(group)
+
+    def _build_keys(self) -> None:
+        group = QGroupBox("API Keys")
+        grid = QGridLayout(group)
+        self.demo_key = QLineEdit(); self.demo_secret = QLineEdit(); self.demo_secret.setEchoMode(QLineEdit.EchoMode.Password)
+        self.real_key = QLineEdit(); self.real_secret = QLineEdit(); self.real_secret.setEchoMode(QLineEdit.EchoMode.Password)
+        self.test_demo_btn = GlassButton("Test DEMO Connection")
+        self.test_real_btn = GlassButton("Test REAL Connection")
+        grid.addWidget(QLabel("Demo Key"), 0, 0); grid.addWidget(self.demo_key, 0, 1)
+        grid.addWidget(QLabel("Demo Secret"), 1, 0); grid.addWidget(self.demo_secret, 1, 1)
+        grid.addWidget(self.test_demo_btn, 2, 1)
+        grid.addWidget(QLabel("Real Key"), 3, 0); grid.addWidget(self.real_key, 3, 1)
+        grid.addWidget(QLabel("Real Secret"), 4, 0); grid.addWidget(self.real_secret, 4, 1)
+        grid.addWidget(self.test_real_btn, 5, 1)
+        self.form_root.addWidget(group)
+
+    def _build_risk(self) -> None:
+        group = QGroupBox("Trade / Risk Settings")
+        form = QFormLayout(group)
+        self.order_value = QDoubleSpinBox(); self.order_value.setMaximum(1_000_000)
+        self.max_lev = QSpinBox(); self.max_lev.setMaximum(125)
+        self.max_pos = QSpinBox(); self.max_pos.setMaximum(100)
+        self.max_loss = QDoubleSpinBox(); self.max_loss.setMaximum(100)
+        self.cooldown = QSpinBox(); self.cooldown.setMaximum(3600)
+        self.spread = QDoubleSpinBox(); self.spread.setMaximum(1000)
+        self.slippage = QDoubleSpinBox(); self.slippage.setMaximum(1000)
+        self.vol_kill = QDoubleSpinBox(); self.vol_kill.setDecimals(4); self.vol_kill.setMaximum(10)
+        self.regime = QCheckBox("Enable")
+        self.regime_thr = QDoubleSpinBox(); self.regime_thr.setMaximum(10)
+        self.max_tph = QSpinBox(); self.max_tph.setMaximum(1000)
+        for lbl, w in [("Order Value", self.order_value), ("Max Leverage", self.max_lev), ("Max positions", self.max_pos), ("Max daily loss %", self.max_loss), ("Cooldown sec", self.cooldown), ("Spread guard bps", self.spread), ("Max slippage bps", self.slippage), ("Vol kill threshold", self.vol_kill), ("Regime filter", self.regime), ("Regime threshold", self.regime_thr), ("Max trades/hour", self.max_tph)]:
+            form.addRow(lbl, w)
+        self.form_root.addWidget(group)
+
+    def _build_strategy(self) -> None:
+        group = QGroupBox("Strategy Parameters")
+        form = QFormLayout(group)
+        self.impulse_pct = QDoubleSpinBox(); self.impulse_pct.setMaximum(100)
+        self.impulse_window = QSpinBox(); self.impulse_window.setMaximum(3600)
+        self.exhaustion = QDoubleSpinBox(); self.exhaustion.setMaximum(10)
+        self.tp1 = QDoubleSpinBox(); self.tp1.setMaximum(1); self.tp1.setSingleStep(0.05)
+        self.tp2 = QDoubleSpinBox(); self.tp2.setMaximum(1); self.tp2.setSingleStep(0.05)
+        self.tp3 = QDoubleSpinBox(); self.tp3.setMaximum(1); self.tp3.setSingleStep(0.05)
+        self.time_stop = QSpinBox(); self.time_stop.setMaximum(7200)
+        self.stop_model = QComboBox(); self.stop_model.addItems(["ATR", "fixed"])
+        for lbl, w in [("impulse_threshold_pct", self.impulse_pct), ("impulse_window_seconds", self.impulse_window), ("exhaustion_ratio_threshold", self.exhaustion), ("TP1", self.tp1), ("TP2", self.tp2), ("TP3", self.tp3), ("time stop sec", self.time_stop), ("stop model", self.stop_model)]:
+            form.addRow(lbl, w)
+        self.form_root.addWidget(group)
+
+    def _build_ml(self) -> None:
+        group = QGroupBox("AI / ML")
+        form = QFormLayout(group)
+        self.spike_toggle = QCheckBox("Spike Classifier")
+        self.ml_toggle = QCheckBox("ML Gate")
+        self.ml_threshold = QDoubleSpinBox(); self.ml_threshold.setMaximum(1); self.ml_threshold.setSingleStep(0.05)
+        self.model_path = QLineEdit()
+        self.export_btn = GlassButton("Export dataset")
+        self.train_btn = GlassButton("Train")
+        self.last_wr = QLabel("Not installed")
+        form.addRow("", self.spike_toggle)
+        form.addRow("", self.ml_toggle)
+        form.addRow("ML threshold", self.ml_threshold)
+        form.addRow("Model path", self.model_path)
+        form.addRow("", self.export_btn)
+        form.addRow("", self.train_btn)
+        form.addRow("Last model winrate", self.last_wr)
+        self.form_root.addWidget(group)
+
+
+class DashboardTabs(QTabWidget):
+    def __init__(self, log_panel: QWidget, settings_panel: QWidget) -> None:
+        super().__init__()
+        self.addTab(log_panel, "Live Log")
+        self.addTab(settings_panel, "Settings")

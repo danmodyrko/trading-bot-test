@@ -3,3 +3,18 @@ QWidget {
   color: #E6EDF7;
   font-family: Inter, "Segoe UI";
 }
+QTabWidget::pane {
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 14px;
+  background: rgba(255,255,255,0.05);
+}
+QTabBar::tab {
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 10px;
+  padding: 8px 16px;
+  margin-right: 6px;
+}
+QTabBar::tab:selected {
+  background: rgba(90,169,255,0.25);
+}

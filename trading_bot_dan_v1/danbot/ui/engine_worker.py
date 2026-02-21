@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import random
 from datetime import datetime, timezone
 
 from PySide6.QtCore import QThread, Signal
 
+from danbot.core.config import AppConfig, AppState, Mode
+from danbot.exchange.adapter import ExchangeAdapter
+from danbot.storage.db import Database
 from danbot.ui.viewmodels import DashboardState, LiveLogEntry
 
 
@@ -13,49 +15,80 @@ class EngineWorker(QThread):
     state_update = Signal(object)
     log_event = Signal(object)
 
-    def __init__(self, initial_state: DashboardState) -> None:
+    def __init__(self, config: AppConfig, app_state: AppState, db: Database, demo_key: str, demo_secret: str, real_key: str, real_secret: str) -> None:
         super().__init__()
         self._running = True
         self._trading_enabled = True
-        self._state = initial_state
+        self._config = config
+        self._app_state = app_state
+        self._db = db
+        mode = Mode(self._app_state.mode)
+        self._adapter = ExchangeAdapter(mode=mode, api_key=demo_key if mode == Mode.DEMO else real_key, api_secret=demo_secret if mode == Mode.DEMO else real_secret)
+        self._state = DashboardState(mode=mode.value, dry_run=app_state.dry_run, risk_pct=app_state.max_daily_loss_pct, api_configured=self._adapter.configured)
+        self._last_lifelog_seen = 0
 
     def run(self) -> None:
         asyncio.run(self._run_loop())
 
     async def _run_loop(self) -> None:
+        self._emit_log("INFO", "INFO", "WS connect")
         tick = 0
         while self._running:
             tick += 1
-            self._state.ws_latency_ms = max(10.0, random.gauss(34, 7))
-            self._state.impulse_score = min(1.0, max(0.0, self._state.impulse_score + random.uniform(-0.05, 0.08)))
-            self._state.spread_bps = max(0.2, random.gauss(1.2, 0.25))
-            self._state.metrics_24h_winrate = min(100.0, max(0.0, 62.2 + random.uniform(-1.4, 1.4)))
-            self._state.metrics_24h_drawdown = max(0.0, 3.1 + random.uniform(-0.4, 0.6))
-            self._state.metrics_24h_profit = 1482.0 + random.uniform(-120.0, 180.0)
             self._state.bot_uptime_seconds += 1
-            self._state.strategy_status = "Decay Detected" if tick % 5 else "Impulse Rising"
-            self.state_update.emit(self._state)
-
+            await self._refresh_latency()
             if tick % 2 == 0:
-                category = random.choice(["SIGNAL", "EXECUTE", "RISK", "EXIT", "INCIDENT", "INFO"])
-                self.log_event.emit(
-                    LiveLogEntry(
-                        ts_iso=datetime.now(timezone.utc).isoformat(),
-                        severity=category,
-                        category=category,
-                        symbol="BTC/USDT",
-                        message=f"{category.title()} event processed",
-                        metrics={"latency_ms": self._state.ws_latency_ms},
-                    )
-                )
-            await asyncio.sleep(0.5)
+                await self._refresh_balance()
+            if tick % 3 == 0:
+                self._refresh_trade_metrics()
+            self._pull_lifelog_events()
+            self.state_update.emit(self._state)
+            await asyncio.sleep(1)
+
+    async def _refresh_latency(self) -> None:
+        try:
+            self._state.ws_latency_ms = await self._adapter.ping_latency_ms()
+        except Exception as exc:
+            self._emit_log("INCIDENT", "INCIDENT", f"WS stale/reconnect required: {exc}")
+
+    async def _refresh_balance(self) -> None:
+        if not self._adapter.configured:
+            self._state.current_balance_usdt = None
+            return
+        try:
+            overview = await self._adapter.get_account_overview()
+            self._state.current_balance_usdt = float(overview["balance_usdt"])
+        except Exception as exc:
+            self._emit_log("INCIDENT", "RISK", f"account refresh failed: {exc}")
+
+    def _refresh_trade_metrics(self) -> None:
+        metrics = self._db.closed_trade_metrics_24h()
+        self._state.metrics_24h_winrate = metrics["winrate"]
+        self._state.metrics_24h_drawdown = metrics["drawdown"]
+        self._state.metrics_24h_profit = metrics["profit"]
+
+    def _pull_lifelog_events(self) -> None:
+        rows = self._db.conn.execute("SELECT id,ts,severity,category,symbol,message,json_metrics FROM lifelog WHERE id > ? ORDER BY id ASC", (self._last_lifelog_seen,)).fetchall()
+        for row in rows:
+            self._last_lifelog_seen = int(row["id"])
+            category = row["category"]
+            self.log_event.emit(LiveLogEntry(ts_iso=row["ts"], severity=row["severity"], category=category, symbol=row["symbol"] or None, message=row["message"], metrics={}))
+            if category.upper() == "EXIT" and "POSITION CLOSED" in row["message"].upper():
+                self._refresh_trade_metrics()
+
+    def _emit_log(self, severity: str, category: str, message: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        self._db.insert_lifelog(now, severity, category, message)
+        self.log_event.emit(LiveLogEntry(now, severity, category, None, message, {}))
 
     def request_stop(self) -> None:
         self._running = False
+        self._emit_log("INFO", "INFO", "engine stop requested")
 
     def emergency_kill(self) -> None:
         self._trading_enabled = False
         self._running = False
+        self._emit_log("INCIDENT", "INCIDENT", "KILL SWITCH engaged")
 
     @property
     def trading_enabled(self) -> bool:

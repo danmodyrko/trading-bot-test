@@ -10,14 +10,12 @@ class DashboardState:
     dry_run: bool = True
     ws_latency_ms: float = 0.0
     risk_pct: float = 1.0
-    strategy_symbol: str = "61464 BTC/USDT"
-    impulse_score: float = 0.0
-    spread_bps: float = 0.0
-    strategy_status: str = "Decay Detected"
+    bot_uptime_seconds: int = 0
+    current_balance_usdt: float | None = None
     metrics_24h_winrate: float | None = None
     metrics_24h_drawdown: float | None = None
     metrics_24h_profit: float | None = None
-    bot_uptime_seconds: int = 0
+    api_configured: bool = False
 
 
 @dataclass(slots=True)
@@ -31,7 +29,7 @@ class LiveLogEntry:
 
 
 class LiveLogModel:
-    def __init__(self, max_entries: int = 1000) -> None:
+    def __init__(self, max_entries: int = 2000) -> None:
         self._entries: deque[LiveLogEntry] = deque(maxlen=max_entries)
 
     def append(self, entry: LiveLogEntry) -> None:

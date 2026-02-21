@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from danbot.strategy.signals import StrategySignal
@@ -11,6 +12,7 @@ class Database:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(path)
+        self.conn.row_factory = sqlite3.Row
 
     def init(self, schema_path: Path | str) -> None:
         schema = Path(schema_path).read_text()
@@ -29,6 +31,13 @@ class Database:
                 ",".join(signal.reason_codes),
                 json.dumps(signal.features),
             ),
+        )
+        self.conn.commit()
+
+    def insert_trade(self, ts: str, symbol: str, side: str, qty: float, price: float, fee: float, pnl: float, slippage_bps: float) -> None:
+        self.conn.execute(
+            "INSERT INTO trades(ts,symbol,side,qty,price,fee,pnl,slippage_bps) VALUES(?,?,?,?,?,?,?,?)",
+            (ts, symbol, side, qty, price, fee, pnl, slippage_bps),
         )
         self.conn.commit()
 
@@ -55,9 +64,42 @@ class Database:
         )
         self.conn.commit()
 
+    def list_recent_lifelog(self, limit: int = 2000) -> list[sqlite3.Row]:
+        rows = self.conn.execute(
+            "SELECT ts,severity,category,symbol,message,json_metrics FROM lifelog ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return list(reversed(rows))
+
     def insert_health_metric(self, ts: str, latency_ms: float, stale_flag: bool, positions_count: int, daily_loss_pct: float) -> None:
         self.conn.execute(
             "INSERT INTO health_metrics(ts,latency_ms,stale_flag,positions_count,daily_loss_pct) VALUES(?,?,?,?,?)",
             (ts, latency_ms, 1 if stale_flag else 0, positions_count, daily_loss_pct),
         )
         self.conn.commit()
+
+    def closed_trade_metrics_24h(self) -> dict[str, float | None]:
+        since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        rows = self.conn.execute(
+            "SELECT ts, pnl FROM trades WHERE ts >= ? ORDER BY ts ASC",
+            (since,),
+        ).fetchall()
+        if not rows:
+            return {"winrate": None, "profit": None, "drawdown": None, "closed_count": 0}
+        pnls = [float(r["pnl"] or 0.0) for r in rows]
+        wins = sum(1 for p in pnls if p > 0)
+        total = len(pnls)
+        profit = sum(pnls)
+        equity = 0.0
+        peak = 0.0
+        max_dd = 0.0
+        for p in pnls:
+            equity += p
+            peak = max(peak, equity)
+            max_dd = max(max_dd, peak - equity)
+        return {
+            "winrate": (wins / total) * 100.0,
+            "profit": profit,
+            "drawdown": max_dd,
+            "closed_count": total,
+        }

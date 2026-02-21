@@ -104,6 +104,7 @@ class MainWindow(QMainWindow):
         self.latency_timer.start(1000)
 
         self._load_logs_from_db()
+        self._refresh_control_state()
 
     def _build_top_bar(self) -> QWidget:
         bar = QWidget()
@@ -302,7 +303,11 @@ class MainWindow(QMainWindow):
         save_app_state(self.config.storage.app_state_path, self.app_state)
         self._save_env()
         self.badge_mode.text_lbl.setText(f"{self.app_state.mode.value} MODE")
+        self.badge_mode.icon_lbl.setPixmap(svg_pixmap("demo.svg", 14, ACCENT_GREEN if self.app_state.mode == Mode.DEMO else ACCENT_RED))
         self.badge_dry.text_lbl.setText("DRY RUN ON" if self.app_state.dry_run else "DRY RUN OFF")
+        self.badge_risk.text_lbl.setText(f"RISK {self.app_state.max_daily_loss_pct:.2f}%")
+        self.settings.kill_status.setText("ENGAGED" if self.app_state.kill_switch_engaged else "OFF")
+        self._refresh_control_state()
 
     @safe_slot
     def _test_connection(self, mode: Mode) -> None:
@@ -354,13 +359,16 @@ class MainWindow(QMainWindow):
         )
         self.worker.state_update.connect(self._on_worker_state)
         self.worker.log_event.connect(self._append_log)
+        self.worker.finished.connect(self._refresh_control_state)
         self.worker.start()
+        self._refresh_control_state()
 
     @safe_slot
     def on_stop(self) -> None:
         if self.worker and self.worker.isRunning():
             self.worker.request_stop()
             self.worker.wait(2000)
+        self._refresh_control_state()
 
     @safe_slot
     def on_kill(self) -> None:
@@ -370,6 +378,15 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             self.worker.emergency_kill()
             self.worker.wait(1000)
+        self._refresh_control_state()
+
+
+    def _refresh_control_state(self) -> None:
+        running = bool(self.worker and self.worker.isRunning())
+        self.start_btn.setEnabled(not running and not self.app_state.kill_switch_engaged)
+        self.stop_btn.setEnabled(running)
+        self.kill_btn.setEnabled(running or not self.app_state.kill_switch_engaged)
+        self.settings.kill_status.setText("ENGAGED" if self.app_state.kill_switch_engaged else "OFF")
 
     def _on_worker_state(self, state) -> None:
         self.badge_ws.text_lbl.setText(f"WS OK {state.ws_latency_ms:.0f}ms")

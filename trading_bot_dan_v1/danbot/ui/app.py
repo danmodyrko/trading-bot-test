@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication, QHBoxLayout, QMainWindow, QVBoxLayou
 
 from danbot.core.config import AppConfig, AppState, Mode, load_app_state, save_app_state
 from danbot.core.presets import PRESETS, apply_preset, detect_profile
-from danbot.exchange.adapter import ExchangeAdapter
+from danbot.exchange.adapter import ExchangeAdapter, NotConfiguredError, TimeSync
 from danbot.storage.db import Database
 from danbot.ui.engine_worker import EngineWorker
 from danbot.ui.theme import ACCENT_BLUE, ACCENT_GOLD, ACCENT_GREEN, ACCENT_RED, DARK_QSS, GAP, OUTER_PADDING, PRIMARY_BG
@@ -21,21 +21,28 @@ from danbot.ui.widgets_glass import GlassButton, LiveLogPanel, MetricCard, PillB
 
 
 class ConnectionTestWorker(QThread):
-    finished_result = Signal(object)
+    connection_result = Signal(bool, str)
 
-    def __init__(self, mode: Mode, key: str, secret: str) -> None:
+    def __init__(self, mode: Mode, key: str, secret: str, time_sync: TimeSync) -> None:
         super().__init__()
         self.mode = mode
         self.key = key
         self.secret = secret
+        self.time_sync = time_sync
 
     def run(self) -> None:
-        adapter = ExchangeAdapter(mode=self.mode, api_key=self.key, api_secret=self.secret)
+        adapter = ExchangeAdapter(mode=self.mode, api_key=self.key, api_secret=self.secret, time_sync=self.time_sync)
         try:
-            overview = asyncio.run(adapter.get_account_overview())
-            self.finished_result.emit((self.mode, True, overview, ""))
+            overview = asyncio.run(self._run_test(adapter))
+            self.connection_result.emit(True, f"{self.mode.value} connection OK — Balance: {overview.get('balance_usdt', 0):.2f} USDT")
+        except NotConfiguredError:
+            self.connection_result.emit(False, f"{self.mode.value} connection failed — API NOT CONFIGURED")
         except Exception as exc:
-            self.finished_result.emit((self.mode, False, {}, str(exc)))
+            self.connection_result.emit(False, f"{self.mode.value} connection failed — {exc}")
+
+    async def _run_test(self, adapter: ExchangeAdapter) -> dict[str, float | int]:
+        await adapter.ensure_mode(self.mode)
+        return await adapter.get_account_overview()
 
 
 def safe_slot(handler):
@@ -63,6 +70,7 @@ class MainWindow(QMainWindow):
         self._custom_log_emitted = False
         self._preset_baseline = self._current_profile_values(self.app_state)
         self._connection_workers: list[ConnectionTestWorker] = []
+        self._time_sync = TimeSync()
 
         self.setWindowTitle("Dan v1 Dashboard")
         self.setFixedSize(1440, 820)
@@ -126,7 +134,7 @@ class MainWindow(QMainWindow):
         self.start_btn.clicked.connect(self.on_start)
         self.stop_btn.clicked.connect(self.on_stop)
         self.kill_btn.clicked.connect(self.on_kill)
-        self.settings_btn.clicked.connect(self.on_open_settings)
+        self.settings_btn.clicked.connect(self.open_settings)
         l.addWidget(self.start_btn)
         l.addWidget(self.stop_btn)
         l.addWidget(self.kill_btn)
@@ -299,6 +307,7 @@ class MainWindow(QMainWindow):
 
     @safe_slot
     def on_save_settings(self) -> None:
+        prev_mode = self.app_state.mode
         self.app_state = self._state_from_form()
         save_app_state(self.config.storage.app_state_path, self.app_state)
         self._save_env()
@@ -308,31 +317,46 @@ class MainWindow(QMainWindow):
         self.badge_risk.text_lbl.setText(f"RISK {self.app_state.max_daily_loss_pct:.2f}%")
         self.settings.kill_status.setText("ENGAGED" if self.app_state.kill_switch_engaged else "OFF")
         self._refresh_control_state()
+        if prev_mode != self.app_state.mode:
+            self._sync_time_for_current_mode()
+
+    def _sync_time_for_current_mode(self) -> None:
+        mode = self.app_state.mode
+        key, secret = self._credentials_for_mode(mode)
+        if not key or not secret:
+            self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INCIDENT", "INCIDENT", None, "API NOT CONFIGURED", {}))
+            return
+
+        async def _sync() -> None:
+            adapter = ExchangeAdapter(mode=mode, api_key=key, api_secret=secret, time_sync=self._time_sync)
+            await adapter.ensure_mode(mode)
+
+        try:
+            asyncio.run(_sync())
+        except NotConfiguredError:
+            self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INCIDENT", "INCIDENT", None, "API NOT CONFIGURED", {}))
+        except Exception as exc:
+            self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INCIDENT", "INCIDENT", None, f"time sync failed: {exc}", {}))
 
     @safe_slot
     def _test_connection(self, mode: Mode) -> None:
         key, secret = self._credentials_for_mode(mode)
         self.settings.set_connection_status(f"Testing {mode.value} API...", is_error=False)
-        worker = ConnectionTestWorker(mode, key, secret)
-        worker.finished_result.connect(self._on_connection_test_done)
+        worker = ConnectionTestWorker(mode, key, secret, self._time_sync)
+        worker.connection_result.connect(lambda success, message, _mode=mode: self._on_connection_test_done(_mode, success, message))
         worker.finished.connect(lambda: self._connection_workers.remove(worker) if worker in self._connection_workers else None)
         self._connection_workers.append(worker)
         worker.start()
 
     @safe_slot
-    def _on_connection_test_done(self, result: tuple[Mode, bool, dict[str, float | int], str]) -> None:
-        mode, ok, overview, error = result
-        if ok:
-            msg = f"{mode.value} API connection success | balance={overview.get('balance_usdt', 0):.2f} available={overview.get('available_usdt', 0):.2f}"
-            self.settings.set_connection_status(msg, is_error=False)
-            self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INFO", "INFO", None, msg, {}))
-        else:
-            msg = f"{mode.value} API connection failed: {error}"
-            self.settings.set_connection_status(msg, is_error=True)
-            self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INCIDENT", "INCIDENT", None, msg, {}))
+    def _on_connection_test_done(self, mode: Mode, ok: bool, message: str) -> None:
+        self.settings.set_connection_status(message, is_error=not ok)
+        severity = "INFO" if ok else "INCIDENT"
+        category = "INFO" if ok else "INCIDENT"
+        self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), severity, category, None, message, {}))
 
     @safe_slot
-    def on_open_settings(self) -> None:
+    def open_settings(self) -> None:
         self.settings_window.show()
         self.settings_window.raise_()
         self.settings_window.activateWindow()
@@ -356,6 +380,7 @@ class MainWindow(QMainWindow):
             demo_secret,
             real_key,
             real_secret,
+            self._time_sync,
         )
         self.worker.state_update.connect(self._on_worker_state)
         self.worker.log_event.connect(self._append_log)

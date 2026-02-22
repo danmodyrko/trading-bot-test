@@ -1,12 +1,38 @@
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from aiohttp import ClientResponseError
+
 from danbot.core.config import Mode
 from danbot.exchange.binance_endpoints import LIVE_REST, TESTNET_REST
 from danbot.exchange.rest_client import BinanceRestClient
+
+
+class NotConfiguredError(RuntimeError):
+    pass
+
+
+@dataclass(slots=True)
+class TimeSync:
+    demo_offset_ms: int = 0
+    real_offset_ms: int = 0
+
+    @property
+    def offset_ms(self) -> int:
+        return self.demo_offset_ms
+
+    def set_offset(self, mode: Mode, offset_ms: int) -> None:
+        if mode == Mode.DEMO:
+            self.demo_offset_ms = int(offset_ms)
+        else:
+            self.real_offset_ms = int(offset_ms)
+
+    def get_offset(self, mode: Mode) -> int:
+        return self.demo_offset_ms if mode == Mode.DEMO else self.real_offset_ms
 
 
 @dataclass(slots=True)
@@ -14,25 +40,74 @@ class ExchangeAdapter:
     mode: Mode
     api_key: str
     api_secret: str
+    time_sync: TimeSync | None = None
     client: BinanceRestClient = field(init=False)
 
     def __post_init__(self) -> None:
         base_url = TESTNET_REST if self.mode == Mode.DEMO else LIVE_REST
         self.client = BinanceRestClient(base_url=base_url, api_key=self.api_key, api_secret=self.api_secret)
+        if self.time_sync is None:
+            self.time_sync = TimeSync()
 
     @property
     def configured(self) -> bool:
         return bool(self.api_key and self.api_secret)
+
+    def _require_keys(self) -> None:
+        if not self.api_key or not self.api_secret:
+            raise NotConfiguredError("API NOT CONFIGURED")
+
+    def switch_mode(self, mode: Mode) -> None:
+        self.mode = mode
+        self.client.base_url = TESTNET_REST if self.mode == Mode.DEMO else LIVE_REST
+
+    async def sync_time(self) -> int:
+        server = await self.client.get("/fapi/v1/time", signed=False)
+        server_time = int(server.get("serverTime", int(time.time() * 1000)))
+        local_time = int(time.time() * 1000)
+        offset = server_time - local_time
+        self.time_sync.set_offset(self.mode, offset)
+        self.client.set_time_offset(offset)
+        return offset
+
+    async def ensure_mode(self, mode: Mode) -> None:
+        if mode != self.mode:
+            self.switch_mode(mode)
+        self.client.set_time_offset(self.time_sync.get_offset(self.mode))
+        await self.sync_time()
 
     async def ping_latency_ms(self) -> float:
         start = time.perf_counter()
         await self.client.get("/fapi/v1/ping")
         return (time.perf_counter() - start) * 1000
 
+    async def _signed_get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        self._require_keys()
+        offset = self.time_sync.get_offset(self.mode)
+        self.client.set_time_offset(offset)
+        if offset == 0:
+            await self.sync_time()
+            self.client.set_time_offset(self.time_sync.get_offset(self.mode))
+        try:
+            return await self.client.get(path, params=params, signed=True)
+        except ClientResponseError as exc:
+            if self._is_time_sync_error(exc):
+                await self.sync_time()
+                self.client.set_time_offset(self.time_sync.get_offset(self.mode))
+                return await self.client.get(path, params=params, signed=True)
+            raise
+
+    def _is_time_sync_error(self, exc: ClientResponseError) -> bool:
+        if "code=-1021" in exc.message:
+            return True
+        try:
+            payload = json.loads(exc.message)
+        except Exception:
+            return False
+        return isinstance(payload, dict) and int(payload.get("code", 0)) == -1021
+
     async def get_account_overview(self) -> dict[str, float | int]:
-        if not self.configured:
-            raise RuntimeError("NOT CONFIGURED")
-        data = await self.client.get("/fapi/v2/account", signed=True)
+        data = await self._signed_get("/fapi/v2/account")
         assets = {item.get("asset"): item for item in data.get("assets", [])}
         usdt = assets.get("USDT", {})
         return {
@@ -44,9 +119,7 @@ class ExchangeAdapter:
         }
 
     async def get_positions(self) -> list[dict[str, Any]]:
-        if not self.configured:
-            return []
-        account = await self.client.get("/fapi/v2/account", signed=True)
+        account = await self._signed_get("/fapi/v2/account")
         out: list[dict[str, Any]] = []
         for pos in account.get("positions", []):
             qty = float(pos.get("positionAmt", 0.0))
@@ -56,16 +129,12 @@ class ExchangeAdapter:
         return out
 
     async def get_recent_fills(self, limit: int = 100, since_ts: int | None = None) -> list[dict[str, Any]]:
-        if not self.configured:
-            return []
         params: dict[str, Any] = {"limit": max(1, min(limit, 1000))}
         if since_ts:
             params["startTime"] = since_ts
-        fills = await self.client.get("/fapi/v1/userTrades", params=params, signed=True)
+        fills = await self._signed_get("/fapi/v1/userTrades", params=params)
         return fills if isinstance(fills, list) else []
 
     async def get_income_history(self, limit: int = 100) -> list[dict[str, Any]]:
-        if not self.configured:
-            return []
-        payload = await self.client.get("/fapi/v1/income", params={"limit": max(1, min(limit, 1000))}, signed=True)
+        payload = await self._signed_get("/fapi/v1/income", params={"limit": max(1, min(limit, 1000))})
         return payload if isinstance(payload, list) else []

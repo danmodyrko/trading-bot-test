@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from PySide6.QtCore import QThread, Signal
 
 from danbot.core.config import AppConfig, AppState, Mode
-from danbot.exchange.adapter import ExchangeAdapter
+from danbot.exchange.adapter import ExchangeAdapter, NotConfiguredError, TimeSync
 from danbot.storage.db import Database
 from danbot.ui.viewmodels import DashboardState, LiveLogEntry
 
@@ -15,7 +15,7 @@ class EngineWorker(QThread):
     state_update = Signal(object)
     log_event = Signal(object)
 
-    def __init__(self, config: AppConfig, app_state: AppState, db: Database, demo_key: str, demo_secret: str, real_key: str, real_secret: str) -> None:
+    def __init__(self, config: AppConfig, app_state: AppState, db: Database, demo_key: str, demo_secret: str, real_key: str, real_secret: str, time_sync: TimeSync | None = None) -> None:
         super().__init__()
         self._running = True
         self._trading_enabled = True
@@ -23,7 +23,7 @@ class EngineWorker(QThread):
         self._app_state = app_state
         self._db = db
         mode = Mode(self._app_state.mode)
-        self._adapter = ExchangeAdapter(mode=mode, api_key=demo_key if mode == Mode.DEMO else real_key, api_secret=demo_secret if mode == Mode.DEMO else real_secret)
+        self._adapter = ExchangeAdapter(mode=mode, api_key=demo_key if mode == Mode.DEMO else real_key, api_secret=demo_secret if mode == Mode.DEMO else real_secret, time_sync=time_sync or TimeSync())
         self._state = DashboardState(mode=mode.value, dry_run=app_state.dry_run, risk_pct=app_state.max_daily_loss_pct, api_configured=self._adapter.configured)
         self._last_lifelog_seen = 0
 
@@ -31,6 +31,12 @@ class EngineWorker(QThread):
         asyncio.run(self._run_loop())
 
     async def _run_loop(self) -> None:
+        try:
+            await self._adapter.ensure_mode(Mode(self._app_state.mode))
+        except NotConfiguredError:
+            self._emit_log("INCIDENT", "INCIDENT", "API NOT CONFIGURED")
+        except Exception as exc:
+            self._emit_log("INCIDENT", "INCIDENT", f"time sync failed: {exc}")
         self._emit_log("INFO", "INFO", "WS connect")
         tick = 0
         while self._running:
@@ -58,6 +64,9 @@ class EngineWorker(QThread):
         try:
             overview = await self._adapter.get_account_overview()
             self._state.current_balance_usdt = float(overview["balance_usdt"])
+        except NotConfiguredError:
+            self._emit_log("INCIDENT", "INCIDENT", "API NOT CONFIGURED")
+            self._state.current_balance_usdt = None
         except Exception as exc:
             self._emit_log("INCIDENT", "RISK", f"account refresh failed: {exc}")
 

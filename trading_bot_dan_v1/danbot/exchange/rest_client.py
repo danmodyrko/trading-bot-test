@@ -22,12 +22,8 @@ class BinanceRestClient:
         query = urlencode(params)
         return hmac.new(self.api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
 
-    async def sync_time(self) -> int:
-        server = await self.get("/fapi/v1/time", signed=False)
-        server_time = int(server.get("serverTime", int(time.time() * 1000)))
-        local_time = int(time.time() * 1000)
-        self.time_offset_ms = server_time - local_time
-        return self.time_offset_ms
+    def set_time_offset(self, offset_ms: int) -> None:
+        self.time_offset_ms = int(offset_ms)
 
     def _signed_params(self, params: dict[str, Any]) -> dict[str, Any]:
         payload = {k: v for k, v in params.items() if k != "signature"}
@@ -40,8 +36,6 @@ class BinanceRestClient:
         raw_params = params or {}
         params = dict(raw_params)
         if signed:
-            if self.time_offset_ms == 0:
-                await self.sync_time()
             params = self._signed_params(raw_params)
         headers = {"X-MBX-APIKEY": self.api_key} if self.api_key else {}
 
@@ -68,11 +62,4 @@ class BinanceRestClient:
                         )
                     return await resp.json(content_type=None)
 
-        try:
-            return await _call()
-        except ClientResponseError as exc:
-            if signed and "code=-1021" in exc.message:
-                await self.sync_time()
-                params = self._signed_params(raw_params)
-                return await _call()
-            raise
+        return await _call()

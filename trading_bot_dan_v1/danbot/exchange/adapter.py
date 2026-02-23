@@ -44,6 +44,8 @@ class ExchangeAdapter:
     api_secret: str
     time_sync: TimeSync | None = None
     client: BinanceRestClient = field(init=False)
+    _log: Any = field(init=False, repr=False)
+    _events: Any = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         base_url = TESTNET_REST if self.mode == Mode.DEMO else LIVE_REST

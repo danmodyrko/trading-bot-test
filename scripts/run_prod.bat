@@ -5,6 +5,8 @@ set APP_ENV=prod
 if "%APP_API_TOKEN%"=="" set APP_API_TOKEN=prod-token-change-me
 set APP_HOST=127.0.0.1
 set APP_PORT=8000
+set VITE_API_URL=http://%APP_HOST%:%APP_PORT%
+set VITE_API_TOKEN=%APP_API_TOKEN%
 
 echo ========================================
 echo Trading Bot - Production Launcher
@@ -31,36 +33,37 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if not exist web\dist (
-  where npm >nul 2>nul
-  if errorlevel 1 (
+where npm >nul 2>nul
+if errorlevel 1 (
+  if not exist web\dist (
     echo Node.js/npm not installed.
     echo Backend started without UI.
     echo Install Node.js LTS to enable dashboard.
   ) else (
-    echo [INFO] Building frontend because web\dist is missing...
-    pushd web
-    if exist package-lock.json (
-      echo [INFO] Installing frontend dependencies with npm ci...
-      call npm ci
-      if errorlevel 1 (
-        echo [WARN] npm ci failed. Falling back to npm install...
-        call npm install
-      )
-    ) else (
-      echo [INFO] package-lock.json missing. Installing frontend dependencies with npm install...
-      call npm install
-    )
-    if errorlevel 1 (
-      echo [WARN] npm install failed. Starting backend without UI build.
-    ) else (
-      call npm run build
-      if errorlevel 1 echo [WARN] npm run build failed. Starting backend without fresh UI build.
-    )
-    popd
+    echo [WARN] Node.js/npm not installed. Reusing existing frontend build from web\dist.
   )
 ) else (
-  echo [INFO] Frontend build already present at web\dist.
+  echo [INFO] Building frontend with VITE_API_URL=%VITE_API_URL%
+  echo [INFO] Building frontend with API token from APP_API_TOKEN.
+  pushd web
+  if exist package-lock.json (
+    echo [INFO] Installing frontend dependencies with npm ci...
+    call npm ci
+    if errorlevel 1 (
+      echo [WARN] npm ci failed. Falling back to npm install...
+      call npm install
+    )
+  ) else (
+    echo [INFO] package-lock.json missing. Installing frontend dependencies with npm install...
+    call npm install
+  )
+  if errorlevel 1 (
+    echo [WARN] npm install failed. Starting backend without fresh UI build.
+  ) else (
+    call npm run build
+    if errorlevel 1 echo [WARN] npm run build failed. Starting backend without fresh UI build.
+  )
+  popd
 )
 
 start "" "http://127.0.0.1:8000"

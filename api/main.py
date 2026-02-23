@@ -13,7 +13,7 @@ from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from api.security import require_rest_token, require_ws_token
-from engine import EngineController
+from api.engine_controller import EngineController
 
 
 class SPAStaticFiles(StaticFiles):
@@ -118,7 +118,13 @@ async def kill():
 
 @app.get("/api/status", dependencies=[Depends(require_rest_token)])
 async def status():
+    await controller.ping_latency()
     return await controller.get_status()
+
+
+@app.get("/api/account", dependencies=[Depends(require_rest_token)])
+async def account():
+    return await controller.get_account_state()
 
 
 @app.get("/api/settings", dependencies=[Depends(require_rest_token)])
@@ -144,12 +150,7 @@ async def positions():
 
 @app.get("/api/orders", dependencies=[Depends(require_rest_token)])
 async def orders():
-    return await controller.get_open_orders()
-
-
-@app.get("/api/signals", dependencies=[Depends(require_rest_token)])
-async def signals():
-    return await controller.get_recent_signals()
+    return await controller.get_orders()
 
 
 @app.get("/api/journal", dependencies=[Depends(require_rest_token)])
@@ -166,13 +167,14 @@ async def ws_events(websocket: WebSocket):
         return
 
     queue = await controller.bus.subscribe(maxsize=256)
+    controller.register_ws()
 
     initial = {
         "type": "snapshot",
         "status": await controller.get_status(),
         "settings": await controller.get_settings(),
         "positions": await controller.get_positions(),
-        "orders": await controller.get_open_orders(),
+        "orders": await controller.get_orders(),
         "events": controller.bus.snapshot(limit=80),
     }
     await websocket.send_json(initial)
@@ -180,21 +182,33 @@ async def ws_events(websocket: WebSocket):
     async def producer() -> None:
         while True:
             event = await queue.get()
-            await websocket.send_json({"type": "event", "event": event})
+            try:
+                await websocket.send_json({"type": "event", "event": event})
+            except (WebSocketDisconnect, RuntimeError):
+                break
 
     async def ticker() -> None:
         while True:
             await asyncio.sleep(1.0)
-            await websocket.send_json({"type": "status", "status": await controller.get_status()})
+            try:
+                await websocket.send_json({"type": "status", "status": await controller.get_status()})
+            except (WebSocketDisconnect, RuntimeError):
+                break
 
     async def heartbeat() -> None:
         while True:
             await asyncio.sleep(10)
-            await websocket.send_json({"type": "ping"})
+            try:
+                await websocket.send_json({"type": "ping"})
+            except (WebSocketDisconnect, RuntimeError):
+                break
 
     async def consumer() -> None:
         while True:
-            payload = await websocket.receive_json()
+            try:
+                payload = await websocket.receive_json()
+            except WebSocketDisconnect:
+                break
             if payload.get("type") == "pong":
                 continue
 
@@ -214,6 +228,7 @@ async def ws_events(websocket: WebSocket):
             with suppress(asyncio.CancelledError):
                 await task
         await controller.bus.unsubscribe(queue)
+        controller.unregister_ws()
 
 
 app.mount("/", SPAStaticFiles(directory=UI_DIST_DIR, html=True, check_dir=False), name="web")

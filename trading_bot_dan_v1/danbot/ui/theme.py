@@ -23,39 +23,39 @@ FONT_STACK = "Inter, 'Segoe UI'"
 
 DARK_QSS = f"""
 
-QPushButton {
+QPushButton {{
     border-radius: 12px;
     border: 1px solid rgba(255,255,255,0.12);
     background: rgba(18,29,45,0.82);
     color: #E6EDF7;
     padding: 10px 16px;
     font-weight: 700;
-}
-QPushButton:hover {
+}}
+QPushButton:hover {{
     border: 1px solid rgba(108,195,255,0.95);
     background: rgba(39,62,92,0.92);
-}
-QPushButton:pressed, QPushButton[flashPressed="true"] {
+}}
+QPushButton:pressed, QPushButton[flashPressed="true"] {{
     border: 1px solid rgba(78,142,196,0.95);
     background: rgba(20,32,48,0.95);
     padding-top: 11px;
     padding-bottom: 9px;
-}
-QPushButton:disabled {
+}}
+QPushButton:disabled {{
     color: rgba(230,237,247,0.45);
     border: 1px solid rgba(255,255,255,0.08);
     background: rgba(18,29,45,0.45);
-}
-QPushButton[variant="primary"] {
+}}
+QPushButton[variant="primary"] {{
     background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #47E698, stop:1 #2ABF72);
     color: #07170f;
     border: 1px solid rgba(111,255,189,0.55);
-}
-QPushButton[variant="danger"] {
+}}
+QPushButton[variant="danger"] {{
     background: rgba(24,13,15,0.88);
     color: #ffd8da;
     border: 1px solid rgba(255,90,95,0.55);
-}
+}}
 QWidget {{
     background-color: {PRIMARY_BG};
     color: {TEXT_MAIN};

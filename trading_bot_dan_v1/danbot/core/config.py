@@ -18,9 +18,15 @@ class RiskConfig(BaseModel):
     max_daily_loss_pct: float = 3.0
     max_trade_risk_pct: float = 0.5
     max_positions: int = 3
+    max_positions_per_symbol: int = 1
     max_leverage: int = 5
     max_notional_per_trade: float = 250.0
+    max_exposure_per_symbol: float = 500.0
+    max_account_exposure: float = 2_000.0
+    max_consecutive_losses: int = 4
     cooldown_seconds: int = 45
+    loss_cooldown_seconds: int = 90
+    include_unrealized_pnl: bool = True
 
 
 class StrategyConfig(BaseModel):
@@ -46,12 +52,14 @@ class ExecutionConfig(BaseModel):
     edge_safety_factor: float = 0.7
     min_orderbook_depth: float = 50000
     spread_guard_bps: float = 15.0
+    max_retry_attempts: int = 3
+    retry_base_delay_s: float = 0.2
     dry_run: bool = True
     enable_real_orders: bool = False
 
 
 class UiConfig(BaseModel):
-    dark_mode: bool = True
+    dark_mode: bool = False
     refresh_ms: int = 200
     sound_notifications: bool = True
 
@@ -60,6 +68,8 @@ class StorageConfig(BaseModel):
     sqlite_path: Path = Path("data/danbot.sqlite3")
     csv_dir: Path = Path("data/exports")
     app_state_path: Path = Path("data/app_state.json")
+    snapshots_path: Path = Path("data/runtime_snapshot.json")
+    trade_journal_path: Path = Path("data/trade_journal.csv")
 
 
 class Endpoints(BaseModel):

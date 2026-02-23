@@ -15,7 +15,8 @@ from danbot.exchange.binance_client import build_clients, discover_usdtm_symbols
 from danbot.exchange.models import OrderRequest, Side
 from danbot.exchange.paper_sim import PaperSimulator
 from danbot.storage.db import Database
-from danbot.strategy.execution import SlippageModel
+from danbot.storage.runtime_state import SnapshotStore, TradeJournal
+from danbot.strategy.execution import ExecutionEngine, SlippageModel, SymbolFilters
 from danbot.strategy.reversal_strategy import ReversalStrategy
 from danbot.strategy.risk import RiskManager
 from danbot.strategy.spike_classifier import classify_spike
@@ -35,13 +36,27 @@ async def run_headless() -> None:
         max_trade_risk_pct=config.risk.max_trade_risk_pct,
         max_notional_per_trade=config.risk.max_notional_per_trade,
         cooldown_seconds=config.risk.cooldown_seconds,
+        max_positions_per_symbol=config.risk.max_positions_per_symbol,
+        max_exposure_per_symbol=config.risk.max_exposure_per_symbol,
+        max_account_exposure=config.risk.max_account_exposure,
+        max_consecutive_losses=config.risk.max_consecutive_losses,
+        loss_cooldown_seconds=config.risk.loss_cooldown_seconds,
+        include_unrealized_pnl=config.risk.include_unrealized_pnl,
     )
     slippage_model = SlippageModel(
         max_slippage_bps=config.execution.max_slippage_bps,
         spread_guard_bps=config.execution.spread_guard_bps,
         edge_safety_factor=config.execution.edge_safety_factor,
     )
+    execution_engine = ExecutionEngine(
+        risk=risk,
+        slippage=slippage_model,
+        retries=config.execution.max_retry_attempts,
+        retry_base_delay_s=config.execution.retry_base_delay_s,
+    )
     sim = PaperSimulator()
+    snapshot_store = SnapshotStore(config.storage.snapshots_path)
+    trade_journal = TradeJournal(config.storage.trade_journal_path)
     tick_engine = TickFeatureEngine(
         impulse_threshold_pct=config.strategy.impulse_threshold_pct,
         impulse_window_seconds=config.strategy.impulse_window_seconds,
@@ -58,6 +73,9 @@ async def run_headless() -> None:
         except Exception as exc:
             logger.warning("Symbol discovery failed: %s", exc)
 
+    async def submit_fn(order: OrderRequest, price: float):
+        return sim.place_order(order, mark_price=price).__dict__
+
     prices = {s: 100.0 + i * 10 for i, s in enumerate(symbols)}
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
@@ -66,46 +84,79 @@ async def run_headless() -> None:
             prices[symbol] += random.uniform(-0.35, 0.45)
             now_ms += 100
             spread_bps = abs(random.gauss(4.0, 1.5))
-            tick = TradeTick(
-                symbol=symbol,
-                ts_ms=now_ms,
-                price=prices[symbol],
-                qty=random.uniform(0.1, 4.0),
-                buyer_maker=bool(random.getrandbits(1)),
-                spread_bps=spread_bps,
-            )
+            tick = TradeTick(symbol=symbol, ts_ms=now_ms, price=prices[symbol], qty=random.uniform(0.1, 4.0), buyer_maker=bool(random.getrandbits(1)), spread_bps=spread_bps)
             snap = tick_engine.on_trade(tick, expected_order_size=0.25)
             features = snap.__dict__
-            if snap.impulse_detected:
-                event_bus.publish(EventRecord(action="IMPULSE_DETECTED", message="Impulse detected", category="SIGNAL", symbol=symbol, details={"impulse_score": snap.impulse_score}))
-            if snap.exhaustion_detected:
-                event_bus.publish(EventRecord(action="EXHAUSTION_DETECTED", message="Exhaustion detected", category="SIGNAL", symbol=symbol, details={"exhaustion_ratio": snap.exhaustion_ratio}))
-            regime_ok = True  # placeholder for EMA20/EMA100 ATR regime filter
-            signal = strategy.evaluate(symbol, features, structure_confirmed=(i % 4 == 0), regime_ok=regime_ok)
-            db.insert_signal(datetime.now(timezone.utc).isoformat(), signal)
+            signal_time = datetime.now(timezone.utc).isoformat()
+            signal = strategy.evaluate(symbol, features, structure_confirmed=(i % 4 == 0), regime_ok=True)
+            db.insert_signal(signal_time, signal)
 
             spike = classify_spike(snap.wick_proxy, snap.trade_rate / max(config.strategy.trade_rate_burst_threshold, 1e-9), snap.imbalance_factor, snap.spread_norm, abs(snap.accel))
-            slippage = slippage_model.expected_slippage_bps(0.25, snap.spread_bps, snap.vol_10s, None, snap.impact)
-            slippage_ok, slippage_reason = slippage_model.validate(slippage, snap.spread_bps, expected_edge_bps=max(snap.impulse_score * 100, 1.0))
             vol_blocked = risk.update_volatility(snap.vol_10s, config.strategy.vol_kill_threshold, config.strategy.vol_cooldown_seconds)
+            risk.update_pnl(risk.loss_today_pct, unrealized_pct=0.0)
 
-            can_trade, risk_reason = risk.can_trade(stale=False, spread_blocked=snap.spread_bps > config.execution.spread_guard_bps, slippage_blocked=not slippage_ok)
-            reasons = [slippage_reason if not slippage_ok else "ok", risk_reason]
-
-            if signal.side and can_trade:
+            if signal.side:
                 side = Side.BUY if signal.side == "BUY" else Side.SELL
                 qty = risk.position_size(1000, signal.confidence, 0.35, size_multiplier=spike.recommended_size_multiplier) / max(tick.price, 1e-9)
-                order = OrderRequest(symbol=symbol, side=side, qty=qty)
+                trade = await execution_engine.place_order(
+                    order=OrderRequest(symbol=symbol, side=side, qty=qty),
+                    mark_price=tick.price,
+                    spread_bps=snap.spread_bps,
+                    expected_edge_bps=max(snap.impulse_score * 100, 1.0),
+                    volatility=snap.vol_10s,
+                    impact=snap.impact,
+                    depth=None,
+                    symbol_filters=SymbolFilters(tick_size=0.01, step_size=0.001, min_notional=5.0),
+                    submit_fn=submit_fn,
+                    signal_time=signal_time,
+                )
                 if config.execution.dry_run or (config.mode.value == "REAL" and not config.execution.enable_real_orders):
-                    db.insert_lifelog(datetime.now(timezone.utc).isoformat(), "SIGNAL", "SIGNAL", "dry-run order blocked", symbol, reasons, metrics={"qty": qty})
-                    event_bus.publish(EventRecord(action="ENTRY_BLOCKED", message="dry-run order blocked", category="RISK", severity="WARNING", symbol=symbol, details={"reason": "dry_run", "qty": qty}))
-                else:
-                    sim.place_order(order, mark_price=tick.price)
-                    db.insert_lifelog(datetime.now(timezone.utc).isoformat(), "SIGNAL", "SIGNAL", "entry placed", symbol, reasons)
-                    event_bus.publish(EventRecord(action="ORDER_SENT", message="entry placed", category="EXECUTE", symbol=symbol, details={"qty": qty, "side": side.value}))
-            elif vol_blocked or not can_trade:
-                db.insert_lifelog(datetime.now(timezone.utc).isoformat(), "RISK", "RISK", "entry blocked", symbol, reasons, metrics={"vol_10s": snap.vol_10s})
-                event_bus.publish(EventRecord(action="ENTRY_BLOCKED", message="entry blocked", category="RISK", severity="WARNING", symbol=symbol, details={"reason": ",".join(reasons), "vol_10s": snap.vol_10s}))
+                    trade.status = "BLOCKED"
+                    trade.reason = "dry_run"
+
+                details = {
+                    "status": trade.status,
+                    "reason": trade.reason,
+                    "qty": trade.qty,
+                    "side": trade.side,
+                    "latency": trade.timestamps.__dict__,
+                }
+                event_bus.publish(EventRecord(action="ORDER", message=f"order {trade.status.lower()}", category="ORDER", symbol=symbol, correlation_id=trade.correlation_id, details=details))
+                db.insert_lifelog(datetime.now(timezone.utc).isoformat(), "INFO" if trade.status == "FILLED" else "WARNING", "ORDER", trade.reason, symbol, [trade.reason], metrics=details)
+            elif vol_blocked:
+                event_bus.publish(EventRecord(action="RISK_BLOCK", message="entry blocked", category="RISK", severity="WARNING", symbol=symbol, details={"reason": "volatility"}))
+
+            if i % 10 == 0:
+                snapshot_store.save(
+                    {
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "positions": risk.snapshot(),
+                        "pending_orders": [],
+                        "cooldowns": risk.snapshot().get("cooldown_until", {}),
+                        "last_event_ts": now_ms,
+                    }
+                )
+
+            if i % 15 == 0:
+                trade_journal.append_completed_trade(
+                    {
+                        "entry_time": signal_time,
+                        "exit_time": datetime.now(timezone.utc).isoformat(),
+                        "symbol": symbol,
+                        "side": signal.side or "",
+                        "size": round(random.uniform(0.01, 0.05), 4),
+                        "entry_price": round(tick.price, 2),
+                        "exit_price": round(tick.price + random.uniform(-0.4, 0.4), 2),
+                        "fees": 0.02,
+                        "pnl": round(random.uniform(-1.5, 2.0), 3),
+                        "mfe": round(random.uniform(0.1, 1.2), 3),
+                        "mae": round(random.uniform(-1.1, -0.1), 3),
+                        "slippage": round(random.uniform(0.0, 1.5), 3),
+                        "reason": "strategy_exit",
+                        "model_score": round(signal.confidence, 3),
+                        "correlation_id": "simulated",
+                    }
+                )
 
             db.insert_health_metric(datetime.now(timezone.utc).isoformat(), latency_ms=50, stale_flag=False, positions_count=risk.open_positions, daily_loss_pct=risk.loss_today_pct)
         await asyncio.sleep(0.02)

@@ -1,89 +1,88 @@
 from __future__ import annotations
 
-PRIMARY_BG = "#0B1220"
-GLASS = "rgba(255,255,255,0.06)"
-GLASS_STRONG = "rgba(255,255,255,0.10)"
-BORDER = "rgba(255,255,255,0.12)"
-TEXT_MAIN = "#E6EDF7"
-TEXT_MUTED = "rgba(230,237,247,0.65)"
-ACCENT_GREEN = "#39D98A"
-ACCENT_RED = "#FF5A5F"
-ACCENT_GOLD = "#F6C453"
-ACCENT_BLUE = "#5AA9FF"
+PRIMARY_BG = "#F6F7F9"
+GLASS = "#FFFFFF"
+GLASS_STRONG = "#FFFFFF"
+BORDER = "#E2E6EC"
+TEXT_MAIN = "#111827"
+TEXT_MUTED = "#6B7280"
+ACCENT_GREEN = "#1F9D62"
+ACCENT_RED = "#D14343"
+ACCENT_GOLD = "#B7791F"
+ACCENT_BLUE = "#1A73E8"
 
-CARD_RADIUS = 22
-PILL_RADIUS = 18
-BTN_RADIUS = 14
+CARD_RADIUS = 14
+PILL_RADIUS = 12
+BTN_RADIUS = 10
 
 OUTER_PADDING = 20
-GAP = 16
-INNER_PADDING = 18
+GAP = 14
+INNER_PADDING = 16
 
-FONT_STACK = "Inter, 'Segoe UI'"
+FONT_STACK = "'Segoe UI', Inter, Arial"
 
 DARK_QSS = f"""
-
-QPushButton {{
-    border-radius: 12px;
-    border: 1px solid rgba(255,255,255,0.12);
-    background: rgba(18,29,45,0.82);
-    color: #E6EDF7;
-    padding: 10px 16px;
-    font-weight: 700;
-}}
-QPushButton:hover {{
-    border: 1px solid rgba(108,195,255,0.95);
-    background: rgba(39,62,92,0.92);
-}}
-QPushButton:pressed, QPushButton[flashPressed="true"] {{
-    border: 1px solid rgba(78,142,196,0.95);
-    background: rgba(20,32,48,0.95);
-    padding-top: 11px;
-    padding-bottom: 9px;
-}}
-QPushButton:disabled {{
-    color: rgba(230,237,247,0.45);
-    border: 1px solid rgba(255,255,255,0.08);
-    background: rgba(18,29,45,0.45);
-}}
-QPushButton[variant="primary"] {{
-    background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #47E698, stop:1 #2ABF72);
-    color: #07170f;
-    border: 1px solid rgba(111,255,189,0.55);
-}}
-QPushButton[variant="danger"] {{
-    background: rgba(24,13,15,0.88);
-    color: #ffd8da;
-    border: 1px solid rgba(255,90,95,0.55);
-}}
 QWidget {{
     background-color: {PRIMARY_BG};
     color: {TEXT_MAIN};
     font-family: {FONT_STACK};
-    font-size: 14px;
+    font-size: 13px;
 }}
-QLineEdit, QComboBox {{
-    background: rgba(255,255,255,0.07);
+QPushButton {{
+    border-radius: {BTN_RADIUS}px;
     border: 1px solid {BORDER};
-    border-radius: 12px;
-    padding: 8px 10px;
+    background: #FFFFFF;
+    color: {TEXT_MAIN};
+    padding: 9px 14px;
+    font-weight: 600;
+}}
+QPushButton:hover {{
+    border: 1px solid #CBD5E1;
+    background: #F8FAFC;
+}}
+QPushButton:pressed, QPushButton[flashPressed="true"] {{
+    background: #EEF2FF;
+    border: 1px solid #AFC8F5;
+}}
+QPushButton:disabled {{
+    color: #9CA3AF;
+    background: #F3F4F6;
+}}
+QPushButton[variant="primary"] {{
+    background: {ACCENT_BLUE};
+    color: #FFFFFF;
+    border: 1px solid #1669D6;
+}}
+QPushButton[variant="danger"] {{
+    background: #FFF1F1;
+    color: {ACCENT_RED};
+    border: 1px solid #F3C8C8;
+}}
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit {{
+    background: #FFFFFF;
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+    padding: 7px 9px;
     color: {TEXT_MAIN};
 }}
-QLineEdit:focus, QComboBox:focus {{
-    border: 1px solid rgba(90,169,255,0.85);
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QTextEdit:focus {{
+    border: 1px solid {ACCENT_BLUE};
+}}
+QGroupBox {{
+    background: #FFFFFF;
+    border: 1px solid {BORDER};
+    border-radius: {CARD_RADIUS}px;
+    margin-top: 8px;
+    padding-top: 10px;
+    font-weight: 600;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    left: 12px;
+    padding: 0 6px;
 }}
 QScrollArea {{
     border: none;
     background: transparent;
-}}
-QScrollBar:vertical {{
-    background: transparent;
-    width: 10px;
-    margin: 2px;
-}}
-QScrollBar::handle:vertical {{
-    background: rgba(255,255,255,0.24);
-    border-radius: 5px;
-    min-height: 30px;
 }}
 """

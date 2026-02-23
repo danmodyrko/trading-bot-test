@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import os
-from datetime import datetime, timezone
+import traceback
 from pathlib import Path
 
 from PySide6.QtCore import QThread, QTimer, Signal
@@ -11,6 +11,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QMainWindow, QVBoxLayout, QWidget
 
 from danbot.core.config import AppConfig, AppState, Mode, load_app_state, save_app_state
+from danbot.core.events import EventRecord, get_event_bus
 from danbot.core.presets import PRESETS, apply_preset, detect_profile
 from danbot.exchange.adapter import ExchangeAdapter, NotConfiguredError, TimeSync
 from danbot.storage.db import Database
@@ -51,7 +52,11 @@ def safe_slot(handler):
         try:
             return handler(self, *args, **kwargs)
         except Exception as exc:  # pragma: no cover
-            self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INCIDENT", "INCIDENT", None, f"UI handler error: {exc}", {}))
+            self.event_bus.incident(
+                action="UI_EXCEPTION",
+                message=f"UI handler error: {exc}",
+                details={"handler": handler.__name__, "trace": traceback.format_exc(limit=5)},
+            )
 
     return wrapper
 
@@ -62,6 +67,7 @@ class MainWindow(QMainWindow):
         self.config = config
         self.db = Database(config.storage.sqlite_path)
         self.db.init(Path(__file__).resolve().parents[1] / "storage" / "schema.sql")
+        self.event_bus = get_event_bus()
         self.app_state = load_app_state(config.storage.app_state_path)
         self.worker: EngineWorker | None = None
         self.log_model = LiveLogModel(max_entries=2000)
@@ -105,7 +111,7 @@ class MainWindow(QMainWindow):
 
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self._flush_logs)
-        self.refresh_timer.start(200)
+        self.refresh_timer.start(120)
 
         self.latency_timer = QTimer(self)
         self.latency_timer.timeout.connect(self._refresh_latency_badge)
@@ -144,13 +150,20 @@ class MainWindow(QMainWindow):
     def _bind_settings(self) -> None:
         self._load_env_into_form()
         self._set_form_from_state(self.app_state)
-        self.settings.save_btn.clicked.connect(self.on_save_settings)
-        self.settings.apply_btn.clicked.connect(self.on_save_settings)
+        self.settings.save_btn.clicked.connect(lambda: self._on_settings_button("SAVE", True))
+        self.settings.apply_btn.clicked.connect(lambda: self._on_settings_button("APPLY", False))
         self.settings.test_demo_btn.clicked.connect(lambda: self._test_connection(Mode.DEMO))
         self.settings.test_real_btn.clicked.connect(lambda: self._test_connection(Mode.REAL))
         for name, btn in self.settings.preset_buttons.items():
             btn.clicked.connect(lambda _=False, preset=name: self.on_apply_preset(preset))
         self._connect_auto_custom_tracking()
+
+    @safe_slot
+    def _on_settings_button(self, label: str, persist: bool) -> None:
+        self.event_bus.publish(EventRecord(action="UI_CLICK", message=f"UI: {label} pressed"))
+        self.on_save_settings()
+        action = "SETTINGS_CHANGED" if persist else "PRESET_APPLIED"
+        self.event_bus.publish(EventRecord(action=action, message=f"Settings {label.lower()} complete"))
 
     def _connect_auto_custom_tracking(self) -> None:
         widgets = [
@@ -274,19 +287,20 @@ class MainWindow(QMainWindow):
             self.settings.set_active_profile("CUSTOM")
             self.app_state.active_profile = "CUSTOM"
             if not self._custom_log_emitted:
-                self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INFO", "INFO", None, "Profile switched to CUSTOM (manual change)", {}))
+                self.event_bus.publish(EventRecord(action="SETTINGS_CHANGED", message="Profile switched to CUSTOM (manual change)"))
                 self._custom_log_emitted = True
         self.on_save_settings()
 
     @safe_slot
     def on_apply_preset(self, preset_name: str) -> None:
+        self.event_bus.publish(EventRecord(action="UI_CLICK", message=f"UI: PRESET {preset_name} pressed"))
         self.app_state = apply_preset(self.app_state, preset_name)
         self.app_state.active_profile = preset_name
         self._preset_baseline = self._current_profile_values(self.app_state)
         self._custom_log_emitted = False
         self._set_form_from_state(self.app_state)
         self.on_save_settings()
-        self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INFO", "INFO", None, f"Preset applied: {preset_name}", {}))
+        self.event_bus.publish(EventRecord(action="PRESET_APPLIED", message=f"Preset applied: {preset_name}", details={"preset": preset_name}))
 
     def _credentials_for_mode(self, mode: Mode) -> tuple[str, str]:
         if mode == Mode.DEMO:
@@ -316,6 +330,7 @@ class MainWindow(QMainWindow):
         self.badge_dry.text_lbl.setText("DRY RUN ON" if self.app_state.dry_run else "DRY RUN OFF")
         self.badge_risk.text_lbl.setText(f"RISK {self.app_state.max_daily_loss_pct:.2f}%")
         self.settings.kill_status.setText("ENGAGED" if self.app_state.kill_switch_engaged else "OFF")
+        self.event_bus.publish(EventRecord(action="SETTINGS_CHANGED", message="Settings saved/applied", details={"mode": self.app_state.mode.value, "dry_run": self.app_state.dry_run}))
         self._refresh_control_state()
         if prev_mode != self.app_state.mode:
             self._sync_time_for_current_mode()
@@ -324,7 +339,7 @@ class MainWindow(QMainWindow):
         mode = self.app_state.mode
         key, secret = self._credentials_for_mode(mode)
         if not key or not secret:
-            self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INCIDENT", "INCIDENT", None, "API NOT CONFIGURED", {}))
+            self.event_bus.incident("API_ERROR", "API NOT CONFIGURED", details={"mode": mode.value})
             return
 
         async def _sync() -> None:
@@ -334,12 +349,13 @@ class MainWindow(QMainWindow):
         try:
             asyncio.run(_sync())
         except NotConfiguredError:
-            self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INCIDENT", "INCIDENT", None, "API NOT CONFIGURED", {}))
+            self.event_bus.incident("API_ERROR", "API NOT CONFIGURED", details={"mode": mode.value})
         except Exception as exc:
-            self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "INCIDENT", "INCIDENT", None, f"time sync failed: {exc}", {}))
+            self.event_bus.incident("API_ERROR", f"time sync failed: {exc}", details={"mode": mode.value})
 
     @safe_slot
     def _test_connection(self, mode: Mode) -> None:
+        self.event_bus.publish(EventRecord(action="UI_CLICK", message=f"UI: Test {mode.value} connection pressed"))
         key, secret = self._credentials_for_mode(mode)
         self.settings.set_connection_status(f"Testing {mode.value} API...", is_error=False)
         worker = ConnectionTestWorker(mode, key, secret, self._time_sync)
@@ -353,20 +369,22 @@ class MainWindow(QMainWindow):
         self.settings.set_connection_status(message, is_error=not ok)
         severity = "INFO" if ok else "INCIDENT"
         category = "INFO" if ok else "INCIDENT"
-        self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), severity, category, None, message, {}))
+        self.event_bus.publish(EventRecord(action="API_CONNECTION_TEST", message=message, severity=severity, category=category, details={"mode": mode.value, "ok": ok}))
 
     @safe_slot
     def open_settings(self) -> None:
+        self.event_bus.publish(EventRecord(action="UI_CLICK", message="UI: SETTINGS pressed"))
         self.settings_window.show()
         self.settings_window.raise_()
         self.settings_window.activateWindow()
 
     @safe_slot
     def on_start(self) -> None:
+        self.event_bus.publish(EventRecord(action="UI_CLICK", message="UI: START pressed"))
         if self.worker and self.worker.isRunning():
             return
         if self.app_state.mode == Mode.REAL and (self.settings.real_gate.text().strip().upper() != "REAL" or not self.settings.real_confirm.isChecked()):
-            self._append_log(LiveLogEntry(datetime.now(timezone.utc).isoformat(), "RISK", "RISK", None, "REAL gate failed; trading blocked", {}))
+            self.event_bus.publish(EventRecord(action="ENTRY_BLOCKED", message="REAL gate failed; trading blocked", severity="WARNING", category="RISK", details={"reason": "REAL gate"}))
             return
         self.app_state.kill_switch_engaged = False
         save_app_state(self.config.storage.app_state_path, self.app_state)
@@ -386,10 +404,12 @@ class MainWindow(QMainWindow):
         self.worker.log_event.connect(self._append_log)
         self.worker.finished.connect(self._refresh_control_state)
         self.worker.start()
+        self.event_bus.publish(EventRecord(action="ENGINE_START", message="engine worker started"))
         self._refresh_control_state()
 
     @safe_slot
     def on_stop(self) -> None:
+        self.event_bus.publish(EventRecord(action="UI_CLICK", message="UI: STOP pressed"))
         if self.worker and self.worker.isRunning():
             self.worker.request_stop()
             self.worker.wait(2000)
@@ -397,12 +417,14 @@ class MainWindow(QMainWindow):
 
     @safe_slot
     def on_kill(self) -> None:
+        self.event_bus.publish(EventRecord(action="UI_CLICK", message="UI: KILL SWITCH pressed"))
         self.app_state.kill_switch_engaged = True
         save_app_state(self.config.storage.app_state_path, self.app_state)
         self.settings.kill_status.setText("ENGAGED")
         if self.worker and self.worker.isRunning():
             self.worker.emergency_kill()
             self.worker.wait(1000)
+        self.event_bus.publish(EventRecord(action="KILL_SWITCH", message="KILL SWITCH engaged", severity="INCIDENT", category="INCIDENT"))
         self._refresh_control_state()
 
 
@@ -436,6 +458,10 @@ class MainWindow(QMainWindow):
         self.pending_refresh = True
 
     def _flush_logs(self) -> None:
+        events = self.event_bus.drain_live_events(limit=300)
+        for evt in events:
+            self.log_model.append(LiveLogEntry(evt.ts_iso, evt.severity, evt.category, evt.symbol, evt.message, evt.details))
+            self.pending_refresh = True
         if not self.pending_refresh:
             return
         self.pending_refresh = False

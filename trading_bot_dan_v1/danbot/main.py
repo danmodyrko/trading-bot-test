@@ -8,6 +8,7 @@ import random
 from datetime import datetime, timezone
 
 from danbot.core.config import load_config
+from danbot.core.events import EventRecord, get_event_bus
 from danbot.core.logging import setup_logging
 from danbot.data.tick_features import TickFeatureEngine, TradeTick
 from danbot.exchange.binance_client import build_clients, discover_usdtm_symbols
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 async def run_headless() -> None:
     config = load_config()
+    event_bus = get_event_bus()
     db = Database(config.storage.sqlite_path)
     db.init(os.path.join(os.path.dirname(__file__), "storage", "schema.sql"))
     strategy = ReversalStrategy(config.strategy)
@@ -74,6 +76,10 @@ async def run_headless() -> None:
             )
             snap = tick_engine.on_trade(tick, expected_order_size=0.25)
             features = snap.__dict__
+            if snap.impulse_detected:
+                event_bus.publish(EventRecord(action="IMPULSE_DETECTED", message="Impulse detected", category="SIGNAL", symbol=symbol, details={"impulse_score": snap.impulse_score}))
+            if snap.exhaustion_detected:
+                event_bus.publish(EventRecord(action="EXHAUSTION_DETECTED", message="Exhaustion detected", category="SIGNAL", symbol=symbol, details={"exhaustion_ratio": snap.exhaustion_ratio}))
             regime_ok = True  # placeholder for EMA20/EMA100 ATR regime filter
             signal = strategy.evaluate(symbol, features, structure_confirmed=(i % 4 == 0), regime_ok=regime_ok)
             db.insert_signal(datetime.now(timezone.utc).isoformat(), signal)
@@ -92,11 +98,14 @@ async def run_headless() -> None:
                 order = OrderRequest(symbol=symbol, side=side, qty=qty)
                 if config.execution.dry_run or (config.mode.value == "REAL" and not config.execution.enable_real_orders):
                     db.insert_lifelog(datetime.now(timezone.utc).isoformat(), "SIGNAL", "SIGNAL", "dry-run order blocked", symbol, reasons, metrics={"qty": qty})
+                    event_bus.publish(EventRecord(action="ENTRY_BLOCKED", message="dry-run order blocked", category="RISK", severity="WARNING", symbol=symbol, details={"reason": "dry_run", "qty": qty}))
                 else:
                     sim.place_order(order, mark_price=tick.price)
                     db.insert_lifelog(datetime.now(timezone.utc).isoformat(), "SIGNAL", "SIGNAL", "entry placed", symbol, reasons)
+                    event_bus.publish(EventRecord(action="ORDER_SENT", message="entry placed", category="EXECUTE", symbol=symbol, details={"qty": qty, "side": side.value}))
             elif vol_blocked or not can_trade:
                 db.insert_lifelog(datetime.now(timezone.utc).isoformat(), "RISK", "RISK", "entry blocked", symbol, reasons, metrics={"vol_10s": snap.vol_10s})
+                event_bus.publish(EventRecord(action="ENTRY_BLOCKED", message="entry blocked", category="RISK", severity="WARNING", symbol=symbol, details={"reason": ",".join(reasons), "vol_10s": snap.vol_10s}))
 
             db.insert_health_metric(datetime.now(timezone.utc).isoformat(), latency_ms=50, stale_flag=False, positions_count=risk.open_positions, daily_loss_pct=risk.loss_today_pct)
         await asyncio.sleep(0.02)

@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
 import websockets
 
-logger = logging.getLogger(__name__)
+from danbot.core.events import EventRecord, get_event_bus
+from danbot.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class BinanceWsClient:
@@ -18,6 +20,7 @@ class BinanceWsClient:
         self.last_message_at: datetime | None = None
         self.stream_last_update: dict[str, datetime] = {}
         self._running = False
+        self._events = get_event_bus()
 
     @property
     def healthy(self) -> bool:
@@ -27,7 +30,10 @@ class BinanceWsClient:
 
     def stale_streams(self) -> list[str]:
         now = datetime.now(timezone.utc)
-        return [s for s, ts in self.stream_last_update.items() if (now - ts).total_seconds() > self.stale_seconds]
+        stale = [s for s, ts in self.stream_last_update.items() if (now - ts).total_seconds() > self.stale_seconds]
+        if stale:
+            self._events.publish(EventRecord(action="WS_STALE", message="stale streams detected", severity="WARNING", category="INCIDENT", details={"streams": stale}))
+        return stale
 
     async def consume(self, stream: str, on_message: Callable[[dict], Awaitable[None]]) -> None:
         self._running = True
@@ -37,6 +43,7 @@ class BinanceWsClient:
             try:
                 async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
                     logger.info("WS connected %s", url)
+                    self._events.publish(EventRecord(action="WS_RECONNECT", message="WS connected", details={"stream": stream}))
                     backoff = 1
                     async for msg in ws:
                         now = datetime.now(timezone.utc)
@@ -52,6 +59,7 @@ class BinanceWsClient:
                         await on_message(payload)
             except Exception as exc:
                 logger.warning("WS disconnected (%s), reconnecting in %ss", exc, backoff)
+                self._events.publish(EventRecord(action="WS_RECONNECT", message=f"WS reconnect scheduled: {exc}", severity="WARNING", category="INCIDENT", details={"stream": stream, "backoff": backoff}))
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30)
 

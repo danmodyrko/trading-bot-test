@@ -40,7 +40,17 @@ if not exist web\dist (
   ) else (
     echo [INFO] Building frontend because web\dist is missing...
     pushd web
-    call npm install
+    if exist package-lock.json (
+      echo [INFO] Installing frontend dependencies with npm ci...
+      call npm ci
+      if errorlevel 1 (
+        echo [WARN] npm ci failed. Falling back to npm install...
+        call npm install
+      )
+    ) else (
+      echo [INFO] package-lock.json missing. Installing frontend dependencies with npm install...
+      call npm install
+    )
     if errorlevel 1 (
       echo [WARN] npm install failed. Starting backend without UI build.
     ) else (

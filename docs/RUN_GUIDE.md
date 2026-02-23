@@ -1,36 +1,81 @@
-# Run Guide (Windows-first)
+# Run Guide
 
-## Dev prerequisites
+## Prerequisites
 - Python 3.11+
-- Node 20+
+- Node.js 20+
+- Windows Command Prompt (for the provided `.bat` scripts)
 
-## Backend
+---
+
+## Single-command runtime requirement
+Both of these commands start the FastAPI server and attach the `EngineController`:
+
 ```bat
-py -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-set APP_API_TOKEN=dev-token
-uvicorn api.main:app --reload --host 127.0.0.1 --port 8000
+python run.py
 ```
 
-## Frontend
+or
+
 ```bat
-cd web
-npm install
-set VITE_API_URL=http://127.0.0.1:8000
-set VITE_API_TOKEN=dev-token
-npm run dev
+python -m api
 ```
 
-## One-command dev launch
-- `scripts\dev.bat`
-- `powershell -ExecutionPolicy Bypass -File scripts\dev.ps1`
+Behavior:
+- API endpoints are available under `/api/*`.
+- Event websocket is available at `/ws/events`.
+- If `web/dist` exists, the built UI is served at `/` and static assets under `/assets/*`.
+- Engine controller is attached at startup.
+- Engine trading loop **does not auto-start** unless `APP_AUTOSTART=true` is set.
 
-## Production-ish local run
-- Start API without `--reload`.
-- Build frontend: `cd web && npm run build`.
-- Serve build with any static web server (or integrated reverse proxy).
+---
 
-## Security
-- Change `APP_API_TOKEN` from default before non-local use.
-- Restrict CORS origins in `api/main.py`.
+## Development mode (Vite + backend reload)
+Use:
+
+```bat
+scripts\dev.bat
+```
+
+What it does:
+- sets `APP_ENV=dev` so backend enables CORS for the Vite dev server.
+- starts backend with reload:
+  - `uvicorn api.main:app --reload --host 127.0.0.1 --port 8000`
+- starts frontend Vite dev server on `http://127.0.0.1:5173`
+- prints backend/frontend URLs in the terminal.
+
+### Dev URLs
+- Backend API: `http://127.0.0.1:8000/api/...`
+- WebSocket: `ws://127.0.0.1:8000/ws/events`
+- Frontend (Vite): `http://127.0.0.1:5173`
+
+---
+
+## Production mode (backend serves built UI)
+Use:
+
+```bat
+scripts\run_prod.bat
+```
+
+What it does:
+1. Runs frontend dependency install/build:
+   - `npm ci`
+   - `npm run build`
+2. Starts backend only via:
+   - `python run.py`
+3. Backend serves built frontend from `web/dist`:
+   - `GET /` -> `index.html`
+   - static assets at `/assets/*`
+   - client-side routes fallback to `index.html`
+
+### Production URL
+- UI + API: `http://127.0.0.1:8000`
+
+---
+
+## Optional environment variables
+- `APP_API_TOKEN` – API/WS bearer token.
+- `APP_ENV` – `dev` to enable CORS for Vite; defaults to `prod` behavior.
+- `APP_AUTOSTART` – set to `true`/`1`/`yes`/`on` to auto-start engine loop at server startup.
+- `APP_HOST` – host for `run.py` / `python -m api` (default `127.0.0.1`).
+- `APP_PORT` – port for `run.py` / `python -m api` (default `8000`).

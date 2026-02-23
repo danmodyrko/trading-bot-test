@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+import subprocess
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.staticfiles import StaticFiles
+from fastapi.responses import PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 
 from api.security import require_rest_token, require_ws_token
 from engine import EngineController
@@ -15,6 +18,12 @@ from engine import EngineController
 
 class SPAStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope):
+        if not self.directory or not Path(self.directory).exists():
+            return PlainTextResponse(
+                "Frontend build is not available. Install Node.js LTS and run the frontend build.",
+                status_code=503,
+            )
+
         response = await super().get_response(path, scope)
         if response.status_code == 404 and scope["method"] == "GET":
             return await super().get_response("index.html", scope)
@@ -30,8 +39,32 @@ def _is_autostart_enabled() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+def _build_frontend_if_missing(ui_dist_dir: Path) -> None:
+    if ui_dist_dir.exists():
+        return
+
+    npm_cmd = shutil.which("npm")
+    if not npm_cmd:
+        print(
+            "Node.js/npm not installed.\n"
+            "Backend started without UI.\n"
+            "Install Node.js LTS to enable dashboard."
+        )
+        return
+
+    web_dir = ui_dist_dir.parent
+    print("web/dist missing: attempting automatic frontend build...")
+    try:
+        subprocess.run([npm_cmd, "install"], cwd=web_dir, check=True)
+        subprocess.run([npm_cmd, "run", "build"], cwd=web_dir, check=True)
+    except subprocess.CalledProcessError as exc:
+        print(f"Frontend build failed: {exc}")
+        print("Backend started without UI.")
+
+
 controller = EngineController()
 UI_DIST_DIR = Path(__file__).resolve().parents[1] / "web" / "dist"
+_build_frontend_if_missing(UI_DIST_DIR)
 
 
 @asynccontextmanager
@@ -183,5 +216,4 @@ async def ws_events(websocket: WebSocket):
         await controller.bus.unsubscribe(queue)
 
 
-if UI_DIST_DIR.exists():
-    app.mount("/", SPAStaticFiles(directory=UI_DIST_DIR, html=True), name="ui")
+app.mount("/", SPAStaticFiles(directory=UI_DIST_DIR, html=True, check_dir=False), name="web")

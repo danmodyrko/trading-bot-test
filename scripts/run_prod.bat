@@ -6,27 +6,53 @@ if "%APP_API_TOKEN%"=="" set APP_API_TOKEN=prod-token-change-me
 set APP_HOST=127.0.0.1
 set APP_PORT=8000
 
-where npm >nul 2>nul
+echo ========================================
+echo Trading Bot - Production Launcher
+echo Host: http://%APP_HOST%:%APP_PORT%
+echo ========================================
+
+cd /d %~dp0..
+
+if not exist .venv (
+  echo [INFO] Creating virtual environment...
+  py -m venv .venv
+)
+
+call .venv\Scripts\activate
 if errorlevel 1 (
-  echo [ERROR] npm is not available in PATH.
-  echo [ERROR] Install Node.js LTS: https://nodejs.org/
-  echo [ERROR] If Node.js is already installed, reopen terminal and run again.
+  echo [ERROR] Could not activate virtual environment.
   exit /b 1
 )
 
-echo ========================================
-echo Production mode starting...
-echo UI + API: http://%APP_HOST%:%APP_PORT%
-echo ========================================
-
-cd /d %~dp0..\web
-call npm ci
-if errorlevel 1 exit /b 1
-call npm run build
-if errorlevel 1 exit /b 1
-
-cd /d %~dp0..
-if not exist .venv py -m venv .venv
-call .venv\Scripts\activate
+echo [INFO] Installing Python dependencies...
 pip install -r requirements.txt
-python run.py
+if errorlevel 1 (
+  echo [ERROR] Failed to install Python dependencies.
+  exit /b 1
+)
+
+if not exist web\dist (
+  where npm >nul 2>nul
+  if errorlevel 1 (
+    echo Node.js/npm not installed.
+    echo Backend started without UI.
+    echo Install Node.js LTS to enable dashboard.
+  ) else (
+    echo [INFO] Building frontend because web\dist is missing...
+    pushd web
+    call npm install
+    if errorlevel 1 (
+      echo [WARN] npm install failed. Starting backend without UI build.
+    ) else (
+      call npm run build
+      if errorlevel 1 echo [WARN] npm run build failed. Starting backend without fresh UI build.
+    )
+    popd
+  )
+) else (
+  echo [INFO] Frontend build already present at web\dist.
+)
+
+start "" "http://127.0.0.1:8000"
+echo [INFO] Starting backend server...
+uvicorn api.main:app --host %APP_HOST% --port %APP_PORT%

@@ -1,24 +1,56 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
+import os
+from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.staticfiles import StaticFiles
 
 from api.security import require_rest_token, require_ws_token
 from engine import EngineController
 
-app = FastAPI(title="Trader Bot Control Center API", version="2.0")
-controller = EngineController()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+class SPAStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if response.status_code == 404 and scope["method"] == "GET":
+            return await super().get_response("index.html", scope)
+        return response
+
+
+def _is_dev_mode() -> bool:
+    return os.getenv("APP_ENV", "prod").lower() == "dev"
+
+
+def _is_autostart_enabled() -> bool:
+    value = os.getenv("APP_AUTOSTART", "false").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+controller = EngineController()
+UI_DIST_DIR = Path(__file__).resolve().parents[1] / "web" / "dist"
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    await controller.attach(autostart=_is_autostart_enabled())
+    yield
+    await controller.shutdown()
+
+
+app = FastAPI(title="Trader Bot Control Center API", version="2.0", lifespan=lifespan)
+
+if _is_dev_mode():
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 @app.post("/api/start", dependencies=[Depends(require_rest_token)])
@@ -149,3 +181,7 @@ async def ws_events(websocket: WebSocket):
             with suppress(asyncio.CancelledError):
                 await task
         await controller.bus.unsubscribe(queue)
+
+
+if UI_DIST_DIR.exists():
+    app.mount("/", SPAStaticFiles(directory=UI_DIST_DIR, html=True), name="ui")

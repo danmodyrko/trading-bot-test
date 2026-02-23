@@ -49,16 +49,33 @@ class EngineController:
     def bus(self) -> EngineEventBus:
         return self._bus
 
+    async def attach(self, autostart: bool = False) -> dict[str, Any]:
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._run_loop())
+            await self._bus.publish(level="INFO", category="SYSTEM", message="Engine controller attached")
+        if autostart:
+            return await self.start()
+        return {"ok": True, "message": "attached"}
+
+    async def shutdown(self) -> None:
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
     async def start(self) -> dict[str, Any]:
         async with self._lock:
             if self._status.running:
                 return {"ok": True, "message": "already running"}
+            if self._task is None or self._task.done():
+                self._task = asyncio.create_task(self._run_loop())
             self._status.running = True
             self._status.started_at = datetime.now(timezone.utc).isoformat()
             self._status.kill_switch_engaged = False
             self._app_state.kill_switch_engaged = False
             self._persist_settings()
-            self._task = asyncio.create_task(self._run_loop())
         await self._bus.publish(level="INFO", category="SYSTEM", message="Engine started")
         return {"ok": True, "message": "started"}
 

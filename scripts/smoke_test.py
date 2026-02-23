@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 
 import httpx
@@ -13,16 +14,18 @@ TOKEN = os.getenv("APP_API_TOKEN", "dev-token")
 async def main() -> None:
     headers = {"X-API-TOKEN": TOKEN}
     async with httpx.AsyncClient(timeout=10) as client:
-        status = (await client.get(f"{API}/api/status", headers=headers)).json()
-        settings = (await client.get(f"{API}/api/settings", headers=headers)).json()
-        print("status:", status)
-        print("settings mode:", settings.get("mode"))
+        response = await client.get(f"{API}/api/status", headers=headers)
+        response.raise_for_status()
+        print("/api/status:", response.json())
 
     ws_url = API.replace("http", "ws") + f"/ws/events?token={TOKEN}"
     async with websockets.connect(ws_url, ping_interval=None) as ws:
-        for _ in range(3):
-            msg = await ws.recv()
-            print("ws:", msg)
+        first_message = await ws.recv()
+        try:
+            first_message = json.loads(first_message)
+        except json.JSONDecodeError:
+            pass
+        print("first websocket event:", first_message)
 
 
 if __name__ == "__main__":

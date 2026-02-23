@@ -9,6 +9,8 @@ from urllib.parse import urlencode
 import aiohttp
 from aiohttp import ClientResponseError
 
+from danbot.core.logging import get_logger, safe_json
+
 
 class BinanceRestClient:
     def __init__(self, base_url: str, api_key: str = "", api_secret: str = "", recv_window: int = 10000) -> None:
@@ -17,6 +19,7 @@ class BinanceRestClient:
         self.api_secret = api_secret
         self.recv_window = recv_window
         self.time_offset_ms = 0
+        self._log = get_logger(__name__)
 
     def _sign(self, params: dict[str, Any]) -> str:
         query = urlencode(params)
@@ -38,6 +41,7 @@ class BinanceRestClient:
         if signed:
             params = self._signed_params(raw_params)
         headers = {"X-MBX-APIKEY": self.api_key} if self.api_key else {}
+        self._log.debug("REST request %s", safe_json({"path": path, "signed": signed, "params": params}))
 
         async def _call() -> Any:
             async with aiohttp.ClientSession(base_url=self.base_url, headers=headers) as session:
@@ -53,6 +57,7 @@ class BinanceRestClient:
                                 detail = f"code={code}, msg={msg}" if code is not None or msg is not None else str(parsed)
                         except Exception:
                             pass
+                        self._log.warning("REST error %s", safe_json({"path": path, "status": resp.status, "detail": detail}))
                         raise ClientResponseError(
                             resp.request_info,
                             tuple(resp.history),

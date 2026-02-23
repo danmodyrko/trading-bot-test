@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QColor, QGuiApplication, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QShortcut, QAction
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
@@ -95,14 +95,22 @@ class PillBadge(QWidget):
 class GlassButton(QPushButton):
     def __init__(self, text: str, variant: str = "secondary") -> None:
         super().__init__(text)
-        if variant == "primary":
-            style = "background: qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #47E698, stop:1 #2ABF72); color: #07170f;"
-        elif variant == "danger":
-            style = "background: rgba(24,13,15,0.85); color: #ffd8da; border: 1px solid rgba(255,90,95,0.45);"
-        else:
-            style = f"background: {GLASS_STRONG}; color: {TEXT_MAIN};"
-        self.setStyleSheet(f"QPushButton {{ {style} border: 1px solid {BORDER}; border-radius: {BTN_RADIUS}px; padding: 10px 16px; font-weight: 700; }}")
+        self.setProperty("variant", variant)
+        self.setProperty("flashPressed", False)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMinimumHeight(40)
+        self.clicked.connect(self._pressed_flash)
+
+    def _pressed_flash(self) -> None:
+        self.setProperty("flashPressed", True)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        QTimer.singleShot(130, self._clear_pressed_flash)
+
+    def _clear_pressed_flash(self) -> None:
+        self.setProperty("flashPressed", False)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
 
 class LogRow(QFrame):
@@ -262,6 +270,9 @@ class SettingsPanel(QWidget):
                 f"background: {GLASS_STRONG}; color: {TEXT_MAIN}; border: 1px solid {BORDER};"
                 "border-radius: 12px; padding: 6px 10px; font-weight: 700; text-align: left;"
                 "}"
+                "QPushButton:hover {border: 1px solid rgba(108,195,255,0.95); background: rgba(74,130,182,0.28);}"
+                "QPushButton:pressed {padding-top: 7px; padding-bottom: 5px; background: rgba(31,46,66,0.95);}"
+                "QPushButton:disabled {color: rgba(230,237,247,0.5); border: 1px solid rgba(255,255,255,0.08);}"
                 "QPushButton:checked {border: 1px solid #4CE6A0; background: rgba(71,230,152,0.18);}"
             )
             self.preset_buttons[name] = btn

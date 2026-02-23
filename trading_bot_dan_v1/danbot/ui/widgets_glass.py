@@ -134,6 +134,17 @@ class LiveLogPanel(QWidget):
     def __init__(self) -> None:
         super().__init__()
         root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        toolbar = QHBoxLayout()
+        self.title = QLabel("Live Event Timeline")
+        self.title.setStyleSheet(f"font-size: 15px; font-weight: 700; color: {TEXT_MAIN};")
+        toolbar.addWidget(self.title)
+        toolbar.addStretch(1)
+        self.copy_btn = GlassButton("Copy all")
+        self.copy_btn.clicked.connect(self.copy_all)
+        toolbar.addWidget(self.copy_btn)
+        root.addLayout(toolbar)
+
         self.list_view = QListView()
         self.list_view.setSelectionMode(QListView.SelectionMode.SingleSelection)
         self.list_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -156,7 +167,7 @@ class LiveLogPanel(QWidget):
 
     def _format_entry(self, entry: LiveLogEntry) -> str:
         ts = entry.ts_iso[11:19]
-        return f"[{ts}] [{entry.severity.upper()}] {entry.message}"
+        return f"[{ts}] [{entry.category.upper()}] [{entry.severity.upper()}] {entry.message}"
 
     def copy_selected(self) -> None:
         index = self.list_view.currentIndex()
@@ -165,11 +176,19 @@ class LiveLogPanel(QWidget):
         line = self._lines[index.row()]
         QGuiApplication.clipboard().setText(line)
 
+    def copy_all(self) -> None:
+        if not self._lines:
+            return
+        QGuiApplication.clipboard().setText("\n".join(self._lines))
+
     def _show_context_menu(self, pos) -> None:
         menu = QMenu(self)
         copy_action = QAction("Copy", self)
         copy_action.triggered.connect(self.copy_selected)
         menu.addAction(copy_action)
+        copy_all = QAction("Copy all", self)
+        copy_all.triggered.connect(self.copy_all)
+        menu.addAction(copy_all)
         menu.exec(self.list_view.viewport().mapToGlobal(pos))
 
 

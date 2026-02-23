@@ -21,6 +21,7 @@ class EventRecord:
     category: str = "INFO"
     severity: str = "INFO"
     symbol: str | None = None
+    correlation_id: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
 
 
@@ -43,12 +44,12 @@ class EventBus:
             details=details if isinstance(details, dict) else {},
         )
         self._buffer.publish(event)
-        self._write_jsonl(event)
-        self._write_logger(event)
+        self._write_jsonl(event, record.correlation_id)
+        self._write_logger(event, record.correlation_id)
         return event
 
     def incident(self, action: str, message: str, details: dict[str, Any] | None = None, symbol: str | None = None) -> LiveEvent:
-        return self.publish(EventRecord(action=action, message=message, category="INCIDENT", severity="INCIDENT", details=details or {}, symbol=symbol))
+        return self.publish(EventRecord(action=action, message=message, category="ERROR", severity="ERROR", details=details or {}, symbol=symbol))
 
     def drain_live_events(self, limit: int = 250) -> list[LiveEvent]:
         return self._buffer.drain(limit=limit)
@@ -56,8 +57,8 @@ class EventBus:
     def snapshot(self) -> list[LiveEvent]:
         return self._buffer.entries
 
-    def _write_logger(self, event: LiveEvent) -> None:
-        payload = {"action": event.action, "symbol": event.symbol, "details": event.details}
+    def _write_logger(self, event: LiveEvent, correlation_id: str | None) -> None:
+        payload = {"action": event.action, "symbol": event.symbol, "correlation_id": correlation_id, "payload": event.details}
         message = f"{event.message} | {json.dumps(payload, ensure_ascii=False, sort_keys=True)}"
         level = event.severity.upper()
         if level in {"INCIDENT", "ERROR"}:
@@ -67,15 +68,16 @@ class EventBus:
         else:
             self._log.info(message)
 
-
-    def _write_jsonl(self, event: LiveEvent) -> None:
+    def _write_jsonl(self, event: LiveEvent, correlation_id: str | None) -> None:
         _EVENT_FILE.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "ts": event.ts_iso,
+            "timestamp": event.ts_iso,
+            "level": event.severity.upper(),
             "category": event.category,
             "symbol": event.symbol,
             "action": event.action,
-            "details": event.details,
+            "correlation_id": correlation_id,
+            "payload": event.details,
         }
         with self._write_lock:
             with _EVENT_FILE.open("a", encoding="utf-8") as fp:

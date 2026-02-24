@@ -16,6 +16,7 @@ if str(DANBOT_ROOT) not in sys.path:
 from danbot import main as danbot_main
 from danbot.core.config import AppConfig, Mode, load_config
 from danbot.core.events import EventRecord, get_event_bus
+from danbot.core.presets import PRESETS
 from danbot.exchange import adapter as exchange_adapter
 from danbot.storage.db import Database
 from danbot.strategy.execution import ExecutionEngine
@@ -164,6 +165,9 @@ class EngineController:
     async def get_settings(self) -> dict[str, Any]:
         return self._config.model_dump(mode="json")
 
+    async def get_presets(self) -> dict[str, Any]:
+        return {"presets": PRESETS}
+
     async def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         merged = self._config.model_dump(mode="python")
         for key, value in payload.items():
@@ -178,7 +182,8 @@ class EngineController:
         return self._config.model_dump(mode="json")
 
     async def test_connection(self, mode: str) -> dict[str, Any]:
-        target_mode = Mode(mode.upper())
+        normalized_mode = "REAL" if mode.upper() == "LIVE" else mode.upper()
+        target_mode = Mode(normalized_mode)
         if self._adapter:
             self._adapter.switch_mode(target_mode)
             with contextlib.suppress(Exception):
@@ -186,14 +191,36 @@ class EngineController:
                 return {"ok": True, "mode": target_mode.value, "latency_ms": latency}
         return {"ok": False, "mode": target_mode.value, "message": "adapter unavailable"}
 
+    async def place_test_trade(self, symbol: str = "BTCUSDT", side: str = "BUY", quote_value_usdt: float = 1.0) -> dict[str, Any]:
+        if not self._adapter:
+            return {"ok": False, "message": "adapter unavailable"}
+        try:
+            return await self._adapter.place_test_trade(symbol=symbol, quote_value_usdt=quote_value_usdt, side=side)
+        except Exception as exc:
+            return {"ok": False, "message": str(exc), "symbol": symbol, "side": side, "quote_value_usdt": quote_value_usdt}
+
     async def get_journal(self, page: int, page_size: int) -> dict[str, Any]:
+        if self._adapter:
+            with contextlib.suppress(Exception):
+                fills = await self._adapter.get_recent_fills(limit=page_size)
+                items = [
+                    {
+                        "ts": datetime.fromtimestamp(int(fill.get("time", 0)) / 1000, tz=timezone.utc).isoformat() if fill.get("time") else "-",
+                        "action": f"TRADE_{str(fill.get('side', '')).upper()}",
+                        "message": f"{fill.get('symbol', '')} qty={fill.get('qty', fill.get('executedQty', '-'))} price={fill.get('price', '-')}",
+                        "raw": fill,
+                    }
+                    for fill in fills
+                ]
+                return {"items": items, "page": 1, "page_size": page_size, "total": len(items), "source": "binance"}
+
         offset = max(page - 1, 0) * page_size
         rows = self._db.conn.execute(
             "SELECT id, ts, severity, category, symbol, message, json_metrics FROM lifelog ORDER BY id DESC LIMIT ? OFFSET ?",
             (page_size, offset),
         ).fetchall()
         total = self._db.conn.execute("SELECT COUNT(1) AS total FROM lifelog").fetchone()["total"]
-        return {"items": [dict(row) for row in rows], "page": page, "page_size": page_size, "total": total}
+        return {"items": [dict(row) for row in rows], "page": page, "page_size": page_size, "total": total, "source": "local"}
 
     def subscribe_events(self, callback: EventCallback) -> None:
         self._callbacks.append(callback)

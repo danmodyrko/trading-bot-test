@@ -132,6 +132,11 @@ async def settings():
     return await controller.get_settings()
 
 
+@app.get("/api/presets", dependencies=[Depends(require_rest_token)])
+async def presets():
+    return await controller.get_presets()
+
+
 @app.put("/api/settings", dependencies=[Depends(require_rest_token)])
 async def update_settings(payload: dict):
     return await controller.update_settings(payload)
@@ -141,6 +146,14 @@ async def update_settings(payload: dict):
 async def test_connection(payload: dict):
     mode = payload.get("mode", "DEMO")
     return await controller.test_connection(mode)
+
+
+@app.post("/api/test-trade", dependencies=[Depends(require_rest_token)])
+async def test_trade(payload: dict):
+    symbol = payload.get("symbol", "BTCUSDT")
+    side = payload.get("side", "BUY")
+    quote_value_usdt = float(payload.get("quote_value_usdt", 1.0))
+    return await controller.place_test_trade(symbol=symbol, side=side, quote_value_usdt=quote_value_usdt)
 
 
 @app.get("/api/positions", dependencies=[Depends(require_rest_token)])

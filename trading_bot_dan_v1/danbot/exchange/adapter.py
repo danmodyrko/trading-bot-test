@@ -115,6 +115,24 @@ class ExchangeAdapter:
             self._events.incident("API_ERROR", f"signed request failed: {exc}", details={"path": path, "mode": self.mode.value})
             raise
 
+    async def _signed_post(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        self._require_keys()
+        offset = self.time_sync.get_offset(self.mode)
+        self.client.set_time_offset(offset)
+        if offset == 0:
+            await self.sync_time()
+            self.client.set_time_offset(self.time_sync.get_offset(self.mode))
+        try:
+            return await self.client.post(path, params=params, signed=True)
+        except ClientResponseError as exc:
+            if self._is_time_sync_error(exc):
+                self._events.publish(EventRecord(action="API_RETRY", message="request retry after time sync", category="INFO", details={"path": path, "mode": self.mode.value}))
+                await self.sync_time()
+                self.client.set_time_offset(self.time_sync.get_offset(self.mode))
+                return await self.client.post(path, params=params, signed=True)
+            self._events.incident("API_ERROR", f"signed request failed: {exc}", details={"path": path, "mode": self.mode.value})
+            raise
+
     def _is_time_sync_error(self, exc: ClientResponseError) -> bool:
         if "code=-1021" in exc.message:
             return True
@@ -154,6 +172,32 @@ class ExchangeAdapter:
         fills = await self._signed_get("/fapi/v1/userTrades", params=params)
         self._events.publish(EventRecord(action="FILL", message="fills fetched", details={"count": len(fills) if isinstance(fills, list) else 0}))
         return fills if isinstance(fills, list) else []
+
+    async def place_test_trade(self, symbol: str = "BTCUSDT", quote_value_usdt: float = 1.0, side: str = "BUY") -> dict[str, Any]:
+        ticker = await self.client.get("/fapi/v1/ticker/price", params={"symbol": symbol}, signed=False)
+        mark_price = float(ticker.get("price", 0.0))
+        if mark_price <= 0:
+            raise RuntimeError("Unable to fetch symbol price")
+
+        quantity = quote_value_usdt / mark_price
+        order_params = {
+            "symbol": symbol,
+            "side": side.upper(),
+            "type": "MARKET",
+            "quantity": f"{quantity:.6f}",
+            "newClientOrderId": f"test-{int(time.time() * 1000)}",
+        }
+        order = await self._signed_post("/fapi/v1/order", params=order_params)
+        self._events.publish(EventRecord(action="ORDER", message="test order submitted", category="ORDER", symbol=symbol, details={"quote_value_usdt": quote_value_usdt, "side": side.upper()}))
+        return {
+            "ok": True,
+            "symbol": symbol,
+            "side": side.upper(),
+            "quote_value_usdt": quote_value_usdt,
+            "estimated_price": mark_price,
+            "quantity": float(order_params["quantity"]),
+            "order": order,
+        }
 
     async def get_income_history(self, limit: int = 100) -> list[dict[str, Any]]:
         payload = await self._signed_get("/fapi/v1/income", params={"limit": max(1, min(limit, 1000))})

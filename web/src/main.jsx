@@ -55,6 +55,9 @@ function App() {
   const [events, setEvents] = useState([])
   const [filter, setFilter] = useState('ALL')
   const [saving, setSaving] = useState(false)
+  const [presets, setPresets] = useState({})
+  const [connectionMsg, setConnectionMsg] = useState('')
+  const [tradeMsg, setTradeMsg] = useState('')
 
   const headers = useMemo(() => ({ 'X-API-TOKEN': API_TOKEN, 'Content-Type': 'application/json' }), [])
 
@@ -65,13 +68,14 @@ function App() {
   }
 
   const loadAll = async () => {
-    const [s, a, p, o, j, cfg] = await Promise.all([
+    const [s, a, p, o, j, cfg, presetResp] = await Promise.all([
       api('/api/status'),
       api('/api/account'),
       api('/api/positions'),
       api('/api/orders'),
       api('/api/journal?page=1&page_size=100'),
-      api('/api/settings')
+      api('/api/settings'),
+      api('/api/presets')
     ])
     setStatus(s)
     setAccount(a)
@@ -79,6 +83,7 @@ function App() {
     setOrders(Array.isArray(o) ? o : [])
     setJournal(j.items || [])
     setSettings(cfg)
+    setPresets(presetResp.presets || {})
   }
 
   useEffect(() => {
@@ -150,6 +155,54 @@ function App() {
     return evt.category === filter || evt.level === filter
   })
 
+
+  const testConnection = async () => {
+    setConnectionMsg('Testing connection...')
+    try {
+      const result = await api('/api/test-connection', { method: 'POST', body: JSON.stringify({ mode: settings.mode || 'DEMO' }) })
+      setConnectionMsg(result.ok ? `Connected (${result.mode}) latency ${result.latency_ms}ms` : `Connection failed: ${result.message || 'unknown error'}`)
+    } catch (error) {
+      setConnectionMsg(`Connection failed: ${error.message}`)
+    }
+  }
+
+  const applyPreset = (presetName) => {
+    const preset = presets[presetName]
+    if (!preset) return
+    setSettings((prev) => ({
+      ...prev,
+      risk: {
+        ...(prev.risk || {}),
+        max_positions: preset.max_positions,
+        max_daily_loss_pct: preset.max_daily_loss_pct
+      },
+      execution: {
+        ...(prev.execution || {}),
+        max_slippage_bps: preset.max_slippage_bps
+      },
+      strategy: {
+        ...(prev.strategy || {}),
+        impulse_threshold_pct: preset.impulse_threshold_pct,
+        impulse_window_seconds: preset.impulse_window_seconds,
+        exhaustion_ratio_threshold: preset.exhaustion_ratio_threshold
+      }
+    }))
+  }
+
+  const placeTestTrade = async () => {
+    setTradeMsg('Submitting $1 test trade...')
+    try {
+      const result = await api('/api/test-trade', {
+        method: 'POST',
+        body: JSON.stringify({ symbol: settings.symbols?.[0] || 'BTCUSDT', side: 'BUY', quote_value_usdt: 1.0 })
+      })
+      setTradeMsg(result.ok ? `Test trade sent: ${result.symbol} qty ${result.quantity}` : `Test trade failed: ${result.message || 'unknown error'}`)
+      await loadAll()
+    } catch (error) {
+      setTradeMsg(`Test trade failed: ${error.message}`)
+    }
+  }
+
   const updateNested = (section, key, value) => {
     setSettings((prev) => ({
       ...prev,
@@ -200,7 +253,9 @@ function App() {
           <button onClick={() => act('/api/resume')} className="action-btn">Resume</button>
           <button onClick={() => act('/api/flatten')} className="action-btn">Flatten</button>
           <button onClick={() => act('/api/kill')} className="action-btn action-bad">Emergency Kill</button>
+          <button onClick={placeTestTrade} className="action-btn">Test Trade ($1)</button>
         </div>
+        {tradeMsg && <p className="text-xs text-text-muted mt-2">{tradeMsg}</p>}
       </SectionCard>
 
       {route === '/dashboard' && <div className="grid xl:grid-cols-3 gap-4">
@@ -288,7 +343,7 @@ function App() {
             <label>Mode
               <select value={settings.mode || 'DEMO'} onChange={(e) => setSettings((prev) => ({ ...prev, mode: e.target.value }))}>
                 <option value="DEMO">DEMO</option>
-                <option value="LIVE">LIVE</option>
+                <option value="REAL">REAL</option>
               </select>
             </label>
             <label>Exchange
@@ -306,6 +361,19 @@ function App() {
             <label>API secret
               <input type="password" value={settings.api?.secret || ''} placeholder="Optional" onChange={(e) => updateNested('api', 'secret', e.target.value)} />
             </label>
+          <div className="flex gap-2 mt-4">
+            <button onClick={testConnection} className="action-btn">Test Connection</button>
+            <button onClick={saveSettings} className="action-btn action-good" disabled={saving}>{saving ? 'Saving...' : 'Save Settings'}</button>
+          </div>
+          {connectionMsg && <p className="text-xs text-text-muted mt-2">{connectionMsg}</p>}
+          <div className="mt-4">
+            <p className="text-xs uppercase text-text-muted mb-2">Presets</p>
+            <div className="flex gap-2 flex-wrap">
+              {Object.keys(presets).map((presetName) => (
+                <button key={presetName} onClick={() => applyPreset(presetName)} className="chip">{presetName}</button>
+              ))}
+            </div>
+          </div>
           </div>
         </SectionCard>
 
@@ -330,7 +398,6 @@ function App() {
               <input value={settings.risk?.stop_loss_pct ?? ''} placeholder="2" onChange={(e) => updateNested('risk', 'stop_loss_pct', parseValue(e.target.value))} />
             </label>
           </div>
-          <button onClick={saveSettings} className="action-btn action-good mt-4" disabled={saving}>{saving ? 'Saving...' : 'Save Settings'}</button>
         </SectionCard>
       </div>}
     </main>

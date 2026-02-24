@@ -2,70 +2,33 @@
 setlocal
 
 set APP_ENV=prod
-if "%APP_API_TOKEN%"=="" set APP_API_TOKEN=prod-token-change-me
+if "%APP_API_TOKEN%"=="" (
+  set APP_API_TOKEN=change-me-token
+  echo [WARN] APP_API_TOKEN was not set. Using temporary token: change-me-token
+  echo [WARN] Set APP_API_TOKEN before running for secure usage.
+)
 set APP_HOST=127.0.0.1
 set APP_PORT=8000
-set VITE_API_URL=http://%APP_HOST%:%APP_PORT%
-set VITE_API_TOKEN=%APP_API_TOKEN%
-
-echo ========================================
-echo Trading Bot - Production Launcher
-echo Host: http://%APP_HOST%:%APP_PORT%
-echo ========================================
 
 cd /d %~dp0..
-
-if not exist .venv (
-  echo [INFO] Creating virtual environment...
-  py -m venv .venv
-)
-
+if not exist .venv py -m venv .venv
 call .venv\Scripts\activate
-if errorlevel 1 (
-  echo [ERROR] Could not activate virtual environment.
-  exit /b 1
-)
-
-echo [INFO] Installing Python dependencies...
-pip install -r requirements.txt
-if errorlevel 1 (
-  echo [ERROR] Failed to install Python dependencies.
-  exit /b 1
-)
+pip install -r requirements.txt || exit /b 1
 
 where npm >nul 2>nul
 if errorlevel 1 (
-  if not exist web\dist (
-    echo Node.js/npm not installed.
-    echo Backend started without UI.
-    echo Install Node.js LTS to enable dashboard.
-  ) else (
-    echo [WARN] Node.js/npm not installed. Reusing existing frontend build from web\dist.
-  )
+  echo [WARN] npm not found. Skipping frontend build and starting backend only.
 ) else (
-  echo [INFO] Building frontend with VITE_API_URL=%VITE_API_URL%
-  echo [INFO] Building frontend with API token from APP_API_TOKEN.
   pushd web
-  if exist package-lock.json (
-    echo [INFO] Installing frontend dependencies with npm ci...
-    call npm ci
-    if errorlevel 1 (
-      echo [WARN] npm ci failed. Falling back to npm install...
-      call npm install
-    )
-  ) else (
-    echo [INFO] package-lock.json missing. Installing frontend dependencies with npm install...
-    call npm install
-  )
+  call npm install
   if errorlevel 1 (
-    echo [WARN] npm install failed. Starting backend without fresh UI build.
+    echo [WARN] npm install failed. Continuing backend only.
   ) else (
     call npm run build
-    if errorlevel 1 echo [WARN] npm run build failed. Starting backend without fresh UI build.
+    if errorlevel 1 echo [WARN] npm run build failed. Continuing backend only.
   )
   popd
 )
 
 start "" "http://127.0.0.1:8000"
-echo [INFO] Starting backend server...
 uvicorn api.main:app --host %APP_HOST% --port %APP_PORT%

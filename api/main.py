@@ -11,6 +11,7 @@ from fastapi import Depends, FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from api.security import require_rest_token, require_ws_token
 from api.engine_controller import EngineController
@@ -24,7 +25,13 @@ class SPAStaticFiles(StaticFiles):
                 status_code=503,
             )
 
-        response = await super().get_response(path, scope)
+        try:
+            response = await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code == 404 and scope["method"] == "GET":
+                return await super().get_response("index.html", scope)
+            raise
+
         if response.status_code == 404 and scope["method"] == "GET":
             return await super().get_response("index.html", scope)
         return response

@@ -4,9 +4,9 @@ import asyncio
 import contextlib
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DANBOT_ROOT = ROOT / "trading_bot_dan_v1"
@@ -14,34 +14,32 @@ if str(DANBOT_ROOT) not in sys.path:
     sys.path.insert(0, str(DANBOT_ROOT))
 
 from danbot import main as danbot_main
-from danbot.core.config import AppConfig, Mode, load_config
+from danbot.core.config import AppConfig, AppState, Mode, load_app_state, load_config, save_app_state
 from danbot.core.events import EventRecord, get_event_bus
-from danbot.core.presets import PRESETS
-from danbot.exchange import adapter as exchange_adapter
+from danbot.core.presets import PRESETS, apply_preset, detect_profile
+from danbot.exchange.adapter import ExchangeAdapter, TimeSync
 from danbot.storage.db import Database
-from danbot.strategy.execution import ExecutionEngine
 from engine.event_bus import EngineEventBus
-
-EventCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 
 
 class EngineController:
     def __init__(self, config_path: Path | str | None = None) -> None:
         self._config_path = Path(config_path or (DANBOT_ROOT / "config.toml"))
         self._config: AppConfig = load_config(self._config_path)
+        self._state_path = Path(self._config.storage.app_state_path)
+        self._state: AppState = load_app_state(self._state_path)
         self._events = get_event_bus()
         self._bus = EngineEventBus(history_limit=8000)
-        self._callbacks: list[EventCallback] = []
         self._running = False
         self._entries_paused = False
-        self._kill_switch_engaged = False
         self._started_at: datetime | None = None
         self._engine_task: asyncio.Task[None] | None = None
         self._event_bridge_task: asyncio.Task[None] | None = None
         self._runtime_lock = asyncio.Lock()
         self._ws_connections = 0
         self._last_latency_ms = 0
-        self._adapter: exchange_adapter.ExchangeAdapter | None = None
+        self._time_sync = TimeSync()
+        self._adapter: ExchangeAdapter | None = None
         self._db = Database(self._config.storage.sqlite_path)
         self._db.init(DANBOT_ROOT / "danbot" / "storage" / "schema.sql")
         self._ensure_runtime_components()
@@ -50,15 +48,15 @@ class EngineController:
     def bus(self) -> EngineEventBus:
         return self._bus
 
+    def _env_for_mode(self, mode: Mode) -> tuple[str, str]:
+        if mode == Mode.DEMO:
+            return os.getenv(self._config.api.demo_key_env, ""), os.getenv(self._config.api.demo_secret_env, "")
+        return os.getenv(self._config.api.real_key_env, ""), os.getenv(self._config.api.real_secret_env, "")
+
     def _ensure_runtime_components(self) -> None:
         mode = Mode(self._config.mode)
-        self._adapter = exchange_adapter.ExchangeAdapter(
-            mode=mode,
-            api_key=os.getenv(self._config.api.demo_key_env if mode == Mode.DEMO else self._config.api.real_key_env, ""),
-            api_secret=os.getenv(self._config.api.demo_secret_env if mode == Mode.DEMO else self._config.api.real_secret_env, ""),
-            time_sync=exchange_adapter.TimeSync(),
-        )
-        self._execution_engine_loaded = ExecutionEngine is not None
+        api_key, api_secret = self._env_for_mode(mode)
+        self._adapter = ExchangeAdapter(mode=mode, api_key=api_key, api_secret=api_secret, time_sync=self._time_sync)
 
     async def attach(self, autostart: bool = False) -> dict[str, Any]:
         if self._event_bridge_task is None or self._event_bridge_task.done():
@@ -69,10 +67,7 @@ class EngineController:
         return {"ok": True, "message": "attached"}
 
     async def shutdown(self) -> None:
-        if self._engine_task and not self._engine_task.done():
-            self._engine_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._engine_task
+        await self.stop()
         if self._event_bridge_task and not self._event_bridge_task.done():
             self._event_bridge_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -84,7 +79,6 @@ class EngineController:
                 return {"ok": True, "message": "already running"}
             self._running = True
             self._entries_paused = False
-            self._kill_switch_engaged = False
             self._started_at = datetime.now(timezone.utc)
             if self._engine_task is None or self._engine_task.done():
                 self._engine_task = asyncio.create_task(danbot_main.run_headless())
@@ -117,7 +111,8 @@ class EngineController:
         return {"ok": True}
 
     async def kill_switch(self) -> dict[str, Any]:
-        self._kill_switch_engaged = True
+        self._state.kill_switch_engaged = True
+        save_app_state(self._state_path, self._state)
         await self.stop()
         self._entries_paused = True
         self._events.publish(EventRecord(action="KILL_SWITCH", message="kill switch engaged", category="RISK", severity="ERROR"))
@@ -129,47 +124,85 @@ class EngineController:
             uptime = int((datetime.now(timezone.utc) - self._started_at).total_seconds())
         return {
             "running": self._running,
-            "entries_paused": self._entries_paused,
-            "kill_switch_engaged": self._kill_switch_engaged,
-            "mode": self._config.mode.value,
-            "uptime_seconds": uptime,
+            "paused": self._entries_paused,
+            "mode": self._config.mode,
             "ws_connected": self._ws_connections > 0,
-            "latency_ms": self._last_latency_ms,
+            "latency": self._last_latency_ms,
+            "uptime": uptime,
         }
 
-    async def get_account_state(self) -> dict[str, Any]:
-        if not self._adapter:
-            return {}
-        try:
-            account = await self._adapter.get_account_overview()
-            return {"balance": account["balance_usdt"], "equity": account["balance_usdt"] + account["unrealized_pnl"], **account}
-        except Exception as exc:
-            return {"error": str(exc), "balance": 0.0, "equity": 0.0}
+    async def get_account(self) -> dict[str, Any]:
+        out = {"balance": "N/A", "equity": "N/A", "daily_pnl": "N/A", "reason": "not available"}
+        if self._adapter:
+            with contextlib.suppress(Exception):
+                overview = await self._adapter.get_account_overview()
+                balance = float(overview.get("balance_usdt", 0))
+                unrealized = float(overview.get("unrealized_pnl", 0))
+                out["balance"] = balance
+                out["equity"] = balance + unrealized
+                out["reason"] = ""
+
+        since = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        rows = self._db.conn.execute("SELECT pnl FROM trades WHERE ts >= ?", (since,)).fetchall()
+        out["daily_pnl"] = sum(float(r["pnl"] or 0.0) for r in rows) if rows else 0.0
+        return out
 
     async def get_positions(self) -> list[dict[str, Any]]:
         if not self._adapter:
             return []
         with contextlib.suppress(Exception):
-            return await self._adapter.get_positions()
+            positions = await self._adapter.get_positions()
+            return [{
+                "symbol": p.get("symbol"),
+                "side": "LONG" if float(p.get("positionAmt", 0)) > 0 else "SHORT",
+                "qty": p.get("positionAmt"),
+                "entry_price": p.get("entryPrice"),
+                "mark_price": p.get("markPrice"),
+                "pnl": p.get("unRealizedProfit"),
+            } for p in positions]
         return []
 
     async def get_orders(self) -> list[dict[str, Any]]:
         if not self._adapter:
             return []
         with contextlib.suppress(Exception):
-            orders = await self._adapter._signed_get("/fapi/v1/openOrders")
-            if isinstance(orders, list):
-                return orders
+            payload = await self._adapter._signed_get("/fapi/v1/openOrders")
+            if isinstance(payload, list):
+                return [{
+                    "id": o.get("orderId"),
+                    "symbol": o.get("symbol"),
+                    "type": o.get("type"),
+                    "side": o.get("side"),
+                    "qty": o.get("origQty"),
+                    "price": o.get("price"),
+                    "status": o.get("status"),
+                } for o in payload]
         return []
 
-    async def get_settings(self) -> dict[str, Any]:
-        return self._config.model_dump(mode="json")
+    async def get_signals(self, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self._db.conn.execute(
+            "SELECT ts,symbol,state,confidence,side,reasons FROM signals ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
 
-    async def get_presets(self) -> dict[str, Any]:
-        return {"presets": PRESETS}
+    async def get_risk(self) -> dict[str, Any]:
+        return {
+            "kill_switch_engaged": self._state.kill_switch_engaged,
+            "active_profile": detect_profile(self._state),
+            "max_daily_loss_pct": self._state.max_daily_loss_pct,
+            "max_positions": self._state.max_positions,
+            "max_leverage": self._state.max_leverage,
+        }
+
+    async def get_settings(self) -> dict[str, Any]:
+        payload = self._config.model_dump(mode="json")
+        payload["app_state"] = self._state.model_dump(mode="json")
+        payload["active_profile"] = detect_profile(self._state)
+        return payload
 
     async def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         merged = self._config.model_dump(mode="python")
+        app_state_patch = payload.pop("app_state", {}) if isinstance(payload.get("app_state", {}), dict) else {}
         for key, value in payload.items():
             if isinstance(value, dict) and isinstance(merged.get(key), dict):
                 merged[key].update(value)
@@ -177,53 +210,44 @@ class EngineController:
                 merged[key] = value
         self._config = AppConfig.model_validate(merged)
         self._write_config_toml(self._config_path, self._config.model_dump(mode="python"))
+        if app_state_patch:
+            state_dump = self._state.model_dump(mode="python")
+            state_dump.update(app_state_patch)
+            self._state = AppState.model_validate(state_dump)
+            save_app_state(self._state_path, self._state)
         self._ensure_runtime_components()
-        self._events.publish(EventRecord(action="SETTINGS_UPDATE", message="settings updated", category="SYSTEM", details=payload))
-        return self._config.model_dump(mode="json")
+        self._events.publish(EventRecord(action="SETTINGS_UPDATE", message="settings updated", category="SYSTEM", details={"keys": list(payload.keys())}))
+        return await self.get_settings()
 
-    async def test_connection(self, mode: str) -> dict[str, Any]:
-        normalized_mode = "REAL" if mode.upper() == "LIVE" else mode.upper()
-        target_mode = Mode(normalized_mode)
-        if self._adapter:
-            self._adapter.switch_mode(target_mode)
-            with contextlib.suppress(Exception):
-                latency = int(await self._adapter.ping_latency_ms())
-                return {"ok": True, "mode": target_mode.value, "latency_ms": latency}
-        return {"ok": False, "mode": target_mode.value, "message": "adapter unavailable"}
+    async def apply_preset(self, name: str) -> dict[str, Any]:
+        name = name.upper()
+        if name not in PRESETS:
+            return {"ok": False, "message": f"unknown preset {name}"}
+        self._state = apply_preset(self._state, name)
+        self._state.active_profile = name
+        save_app_state(self._state_path, self._state)
+        self._events.publish(EventRecord(action="PRESET_APPLIED", message=f"Preset applied: {name}", category="SYSTEM"))
+        return {"ok": True, "preset": name, "settings": await self.get_settings()}
 
-    async def place_test_trade(self, symbol: str = "BTCUSDT", side: str = "BUY", quote_value_usdt: float = 1.0) -> dict[str, Any]:
-        if not self._adapter:
-            return {"ok": False, "message": "adapter unavailable"}
+    async def test_connection(self, mode: str, key: str | None = None, secret: str | None = None) -> dict[str, Any]:
+        target_mode = Mode(mode.upper())
+        key = key if key is not None else self._env_for_mode(target_mode)[0]
+        secret = secret if secret is not None else self._env_for_mode(target_mode)[1]
+        adapter = ExchangeAdapter(mode=target_mode, api_key=key, api_secret=secret, time_sync=self._time_sync)
         try:
-            return await self._adapter.place_test_trade(symbol=symbol, quote_value_usdt=quote_value_usdt, side=side)
+            latency = int(await adapter.ping_latency_ms())
+            return {"ok": True, "mode": target_mode.value, "latency_ms": latency}
         except Exception as exc:
-            return {"ok": False, "message": str(exc), "symbol": symbol, "side": side, "quote_value_usdt": quote_value_usdt}
+            return {"ok": False, "mode": target_mode.value, "reason": str(exc)}
 
-    async def get_journal(self, page: int, page_size: int) -> dict[str, Any]:
-        if self._adapter:
-            with contextlib.suppress(Exception):
-                fills = await self._adapter.get_recent_fills(limit=page_size)
-                items = [
-                    {
-                        "ts": datetime.fromtimestamp(int(fill.get("time", 0)) / 1000, tz=timezone.utc).isoformat() if fill.get("time") else "-",
-                        "action": f"TRADE_{str(fill.get('side', '')).upper()}",
-                        "message": f"{fill.get('symbol', '')} qty={fill.get('qty', fill.get('executedQty', '-'))} price={fill.get('price', '-')}",
-                        "raw": fill,
-                    }
-                    for fill in fills
-                ]
-                return {"items": items, "page": 1, "page_size": page_size, "total": len(items), "source": "binance"}
-
-        offset = max(page - 1, 0) * page_size
+    async def get_journal(self, page: int, limit: int) -> dict[str, Any]:
+        offset = max(page - 1, 0) * limit
         rows = self._db.conn.execute(
             "SELECT id, ts, severity, category, symbol, message, json_metrics FROM lifelog ORDER BY id DESC LIMIT ? OFFSET ?",
-            (page_size, offset),
+            (limit, offset),
         ).fetchall()
         total = self._db.conn.execute("SELECT COUNT(1) AS total FROM lifelog").fetchone()["total"]
-        return {"items": [dict(row) for row in rows], "page": page, "page_size": page_size, "total": total, "source": "local"}
-
-    def subscribe_events(self, callback: EventCallback) -> None:
-        self._callbacks.append(callback)
+        return {"items": [dict(row) for row in rows], "page": page, "limit": limit, "total": total}
 
     def register_ws(self) -> None:
         self._ws_connections += 1
@@ -243,12 +267,13 @@ class EngineController:
     async def _bridge_danbot_events(self) -> None:
         while True:
             for event in self._events.drain_live_events(limit=250):
-                packet = {"ts": event.ts_iso, "category": event.category, "level": event.severity, "message": event.message, "payload": event.details}
-                await self._bus.publish(level=packet["level"], category=packet["category"], message=packet["message"], symbol=event.symbol, payload=packet["payload"])
-                for callback in list(self._callbacks):
-                    result = callback(packet)
-                    if asyncio.iscoroutine(result):
-                        await result
+                await self._bus.publish(
+                    level=event.severity,
+                    category=event.category,
+                    message=event.message,
+                    symbol=event.symbol,
+                    payload=event.details,
+                )
             await asyncio.sleep(0.25)
 
     def _write_config_toml(self, path: Path, config_data: dict[str, Any]) -> None:

@@ -40,7 +40,7 @@ class StrategyConfig(BaseModel):
     vol_cooldown_seconds: int = 30
     regime_filter_enabled: bool = True
     trend_strength_threshold: float = 1.4
-    retrace_target_pct: tuple[float, float, float] = (0.3, 0.5, 0.6)
+    retrace_target_pct: tuple[float, ...] = (0.3, 0.5, 0.6)
     stop_loss_model: Literal["ATR", "fixed"] = "ATR"
     take_profit_model: Literal["dynamic_retrace", "fixed"] = "dynamic_retrace"
     hard_time_stop_seconds: int = 120

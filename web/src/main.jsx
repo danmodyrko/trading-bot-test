@@ -1,95 +1,212 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { TOKENS } from './theme/tokens'
 import './index.css'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
 const API_TOKEN = import.meta.env.VITE_API_TOKEN || 'dev-token'
-const routes = ['Dashboard', 'Positions', 'Orders', 'Journal', 'Settings']
-const filters = ['ALL', 'INFO', 'WARNING', 'ERROR', 'SYSTEM', 'ORDER', 'RISK']
+const NAV = ['TERMINAL', 'HISTORY', 'DEV', 'CONFIG']
+
+const iconMap = {
+  TERMINAL: '◫',
+  HISTORY: '↺',
+  DEV: '∿',
+  CONFIG: '⚙',
+}
 
 function App() {
-  const [route, setRoute] = useState(location.pathname === '/' ? 'Dashboard' : location.pathname.slice(1).replace(/^\w/, (c) => c.toUpperCase()))
-  const [status, setStatus] = useState({ running: false, mode: 'DEMO', ws_connected: false, latency: 0, uptime: 0 })
-  const [account, setAccount] = useState({ balance: 'N/A', equity: 'N/A', daily_pnl: 'N/A', reason: '' })
+  const [route, setRoute] = useState((location.pathname.slice(1) || 'terminal').toUpperCase())
+  const [status, setStatus] = useState({ running: false, mode: 'DEMO', ws_connected: false, server_time: '—', reconnecting: true })
+  const [account, setAccount] = useState({ balance: '—', equity: '—', daily_pnl: '—', open_positions: 0, active_orders: 0 })
   const [positions, setPositions] = useState([])
   const [orders, setOrders] = useState([])
   const [signals, setSignals] = useState([])
-  const [risk, setRisk] = useState({})
-  const [settings, setSettings] = useState({})
-  const [journal, setJournal] = useState([])
+  const [settings, setSettings] = useState(null)
   const [events, setEvents] = useState([])
-  const [eventFilter, setEventFilter] = useState('ALL')
-  const [banner, setBanner] = useState('')
+  const [journal, setJournal] = useState([])
+  const [consoleOutput, setConsoleOutput] = useState('')
+  const [wsDown, setWsDown] = useState(false)
 
   const headers = useMemo(() => ({ 'X-API-TOKEN': API_TOKEN, 'Content-Type': 'application/json' }), [])
-  const api = async (path, opts = {}) => {
-    const response = await fetch(`${API_URL}${path}`, { ...opts, headers: { ...headers, ...(opts.headers || {}) } })
-    if (!response.ok) throw new Error(await response.text())
-    return response.json()
+  const api = async (path, options = {}) => {
+    const response = await fetch(`${API_URL}${path}`, { ...options, headers: { ...headers, ...(options.headers || {}) } })
+    const text = await response.text()
+    const json = text ? JSON.parse(text) : {}
+    if (!response.ok) throw new Error(text)
+    return json
   }
 
   const refresh = async () => {
-    const [s, a, p, o, g, r, cfg, j] = await Promise.all([
-      api('/api/status'), api('/api/account'), api('/api/positions'), api('/api/orders'), api('/api/signals'), api('/api/risk'), api('/api/settings'), api('/api/journal?page=1&limit=100')
+    const [st, ac, ps, os, sg, cfg, jr] = await Promise.all([
+      api('/api/status'), api('/api/account'), api('/api/positions'), api('/api/orders'), api('/api/signals?limit=100'), api('/api/settings'), api('/api/journal?page=1&limit=200'),
     ])
-    setStatus(s); setAccount(a); setPositions(p); setOrders(o); setSignals(g); setRisk(r); setSettings(cfg); setJournal(j.items || [])
+    setStatus(st); setAccount(ac); setPositions(ps || []); setOrders(os || []); setSignals(sg || []); setSettings(cfg); setJournal(jr.items || [])
   }
+
   useEffect(() => { refresh() }, [])
 
   useEffect(() => {
     const ws = new WebSocket(`${API_URL.replace('http', 'ws')}/ws/events?token=${encodeURIComponent(API_TOKEN)}`)
-    ws.onmessage = (m) => {
-      const d = JSON.parse(m.data)
-      if (d.type === 'INITIAL_SNAPSHOT') {
-        setStatus(d.status); setAccount(d.account); setPositions(d.positions || []); setOrders(d.orders || []); setSignals(d.signals || []); setRisk(d.risk || {}); setSettings(d.settings || {}); setEvents(d.events || []); setBanner('')
-      } else if (d.type === 'EVENT') setEvents((prev) => [d.event, ...prev].slice(0, 2000))
-      else if (d.type === 'STATUS_TICK') { setStatus(d.status); setAccount(d.account) }
+    ws.onopen = () => setWsDown(false)
+    ws.onmessage = (evt) => {
+      const packet = JSON.parse(evt.data)
+      if (packet.type === 'INITIAL_SNAPSHOT') {
+        setStatus(packet.status || {})
+        setAccount(packet.account || {})
+        setPositions(packet.positions || [])
+        setOrders(packet.orders || [])
+        setSignals(packet.signals || [])
+        setSettings(packet.settings || null)
+        setEvents(packet.events || [])
+      }
+      if (packet.type === 'EVENT') setEvents((prev) => [packet.event, ...prev].slice(0, 1500))
+      if (packet.type === 'STATUS_TICK') {
+        setStatus(packet.status || {})
+        setAccount(packet.account || {})
+      }
     }
-    ws.onclose = () => setBanner('WebSocket disconnected; attempting REST only.')
+    ws.onclose = () => setWsDown(true)
     return () => ws.close()
   }, [])
 
-  const go = (name) => { history.pushState({}, '', `/${name.toLowerCase()}`); setRoute(name) }
-  const act = async (path, body = null) => { await api(path, { method: 'POST', body: body ? JSON.stringify(body) : undefined }); refresh() }
-  const saveSettings = async () => { await api('/api/settings', { method: 'PUT', body: JSON.stringify(settings) }); refresh() }
-  const setField = (section, key, value) => setSettings((s) => ({ ...s, [section]: { ...(s[section] || {}), [key]: value } }))
-  const applyPreset = (name) => act(`/api/preset/${name.toLowerCase()}`)
+  const action = async (path, body) => {
+    const payload = await api(path, { method: 'POST', body: body ? JSON.stringify(body) : undefined })
+    setConsoleOutput(JSON.stringify(payload, null, 2))
+    await refresh()
+  }
 
-  const fields = settings?.app_state ? Object.keys(settings.app_state) : []
-  const shownEvents = events.filter((e) => eventFilter === 'ALL' || e.level === eventFilter || e.category === eventFilter)
+  const saveSettings = async () => {
+    const payload = await api('/api/settings', { method: 'PUT', body: JSON.stringify(settings) })
+    setSettings(payload)
+    setConsoleOutput(JSON.stringify({ success: true, settings_saved: true }, null, 2))
+  }
 
-  return <div className='app' style={{ '--bg': TOKENS.PRIMARY_BG, '--border': TOKENS.BORDER, '--txt': TOKENS.TEXT_MAIN, '--muted': TOKENS.TEXT_MUTED, '--blue': TOKENS.ACCENT_BLUE, '--red': TOKENS.ACCENT_RED, '--green': TOKENS.ACCENT_GREEN, '--gold': TOKENS.ACCENT_GOLD }}>
-    <aside className='sidebar'>{routes.map((r) => <button key={r} className={`btn nav ${route === r ? 'active' : ''}`} onClick={() => go(r)}>{r}</button>)}</aside>
-    <main className='main'>
-      {banner && <div className='banner'>{banner}</div>}
-      <section className='card row'>
-        <span className='pill'>{status.running ? 'RUNNING' : 'STOPPED'}</span>
-        <span className='pill'>{status.mode}</span><span className='pill'>{status.ws_connected ? 'CONNECTED' : 'DISCONNECTED'}</span>
-        <button className='btn' onClick={() => act('/api/start')}>Start</button><button className='btn' onClick={() => act('/api/stop')}>Stop</button>
-        <button className='btn' onClick={() => act('/api/pause')}>Pause</button><button className='btn' onClick={() => act('/api/resume')}>Resume</button>
-        <button className='btn' onClick={() => act('/api/flatten')}>Flatten</button><button className='btn danger' onClick={() => act('/api/kill')}>Kill</button>
-      </section>
-      {route === 'Dashboard' && <>
-        <section className='row'>
-          <div className='card metric'><h4>Balance</h4><b>{account.balance}</b></div>
-          <div className='card metric'><h4>Equity</h4><b>{account.equity}</b></div>
-          <div className='card metric'><h4>Daily PnL</h4><b>{account.daily_pnl}</b></div>
-        </section>
-        <section className='card'><h3>Presets</h3><div className='row'><button className='btn' onClick={() => applyPreset('safe')}>Safe</button><button className='btn' onClick={() => applyPreset('medium')}>Medium</button><button className='btn' onClick={() => applyPreset('aggressive')}>Aggressive</button><span className='pill'>Profile: {settings?.active_profile || risk.active_profile || 'CUSTOM'}</span></div></section>
-        <section className='card'><h3>Live log</h3><div className='row'>{filters.map((f) => <button key={f} className='btn' onClick={() => setEventFilter(f)}>{f}</button>)}<button className='btn' onClick={() => navigator.clipboard.writeText(shownEvents.map((e) => `${e.ts} ${e.category} ${e.message}`).join('\n'))}>Copy</button></div><div className='log'>{shownEvents.slice(0, 200).map((e, i) => <div key={i}>{e.ts} [{e.category}] {e.message}</div>)}</div></section>
-      </>}
-      {route === 'Positions' && <Table title='Positions' rows={positions} cols={['symbol', 'side', 'qty', 'entry_price', 'mark_price', 'pnl']} />}
-      {route === 'Orders' && <Table title='Orders' rows={orders} cols={['id', 'symbol', 'type', 'side', 'qty', 'price', 'status']} />}
-      {route === 'Journal' && <Table title='Journal' rows={journal} cols={['ts', 'severity', 'category', 'symbol', 'message']} />}
-      {route === 'Settings' && <section className='card'><h3>Settings</h3><div className='row'><button className='btn' onClick={() => act('/api/test-connection', { mode: 'DEMO' })}>Test DEMO</button><button className='btn' onClick={() => act('/api/test-connection', { mode: 'REAL' })}>Test REAL</button><button className='btn good' onClick={saveSettings}>Save</button></div><div className='form'>{Object.keys(settings).filter((k) => typeof settings[k] === 'object' && k !== 'app_state').map((section) => <div key={section} className='card'><h4>{section}</h4>{Object.entries(settings[section]).map(([k, v]) => <label key={k}>{k}<input value={Array.isArray(v) ? v.join(',') : String(v)} onChange={(e) => setField(section, k, e.target.value)} /></label>)}</div>)}{fields.length > 0 && <div className='card'><h4>app_state</h4>{fields.map((k) => <label key={k}>{k}<input value={String(settings.app_state[k])} onChange={(e) => setSettings((s) => ({ ...s, app_state: { ...(s.app_state || {}), [k]: e.target.value } }))} /></label>)}</div>}</div></section>}
-      <section className='card'><h3>Signals</h3><Table rows={signals} cols={['ts', 'symbol', 'state', 'confidence', 'side', 'reasons']} /></section>
-    </main>
+  const patchSettings = (fn) => setSettings((old) => fn(structuredClone(old)))
+  const fmt = (v) => (v === null || v === undefined || v === '' ? '—' : v)
+
+  return <div className='layout'>
+    <aside className='sidebar'>
+      <div className='brand'><span className='bolt'>⚡</span><b>BELEVAKU</b></div>
+      <nav>{NAV.map((item) => <button key={item} className={`nav-btn ${route === item ? 'active' : ''}`} onClick={() => { history.replaceState({}, '', `/${item.toLowerCase()}`); setRoute(item) }}><span>{iconMap[item]}</span>{item}</button>)}</nav>
+      <div className='sidebar-footer'>
+        <div className='tiny'>ACCOUNT EQUITY</div><div className='money'>${fmt(account.equity)}</div>
+        <div className='tiny'>DAILY PNL</div><div className='green'>+${fmt(account.daily_pnl)} (0.00%)</div>
+      </div>
+    </aside>
+
+    <section className='main'>
+      <header className='top'>
+        <div className='title-wrap'>
+          <h1>Belevaku Trading</h1>
+          <div className='subtitle'><span className='dot amber'/>BOT: {status.running ? 'RUNNING' : 'STOPPED'}</div>
+        </div>
+        <div className='kpis'>
+          <Kpi label='WALLET BALANCE' value={account.balance || '—'} />
+          <Kpi label='OPEN POSITIONS' value={account.open_positions ?? '—'} />
+          <Kpi label='ACTIVE ORDERS' value={account.active_orders ?? '—'} />
+          <Kpi label='TOTAL PNL' value={account.daily_pnl || '—'} />
+        </div>
+        <div className='top-right'>
+          <span className='binance'><span className={`dot ${status.ws_connected ? 'green' : 'red'}`}/>BINANCE: {status.ws_connected ? 'ONLINE' : 'OFFLINE'}</span>
+          <button className='start-btn' onClick={() => action(status.running ? '/api/stop' : '/api/start')}>{status.running ? '■ STOP' : '▶ START'}</button>
+        </div>
+      </header>
+
+      {route === 'TERMINAL' && <Terminal account={account} settings={settings} journal={journal} orders={orders} />}
+      {route === 'HISTORY' && <History signals={signals} journal={journal} />}
+      {route === 'DEV' && <Dev onAction={action} consoleOutput={consoleOutput} settings={settings} />}
+      {route === 'CONFIG' && <Config settings={settings} patchSettings={patchSettings} saveSettings={saveSettings} />}
+
+      <footer className='statusbar'>
+        <div>VOL FILTER: {Math.round((settings?.min_quote_volume_24h || 25000000) / 1_000_000)}M &nbsp;&nbsp; EXCHANGE: BINANCE &nbsp;&nbsp; MODE: {status.mode}</div>
+        <div>SERVER TIME: {status.server_time?.slice(11, 19) || '—'} &nbsp;<span className='reconnect'>{(wsDown || status.reconnecting) ? 'RECONNECTING...' : 'LIVE'}</span></div>
+      </footer>
+    </section>
   </div>
 }
 
-function Table({ title, rows = [], cols = [] }) {
-  return <section className='card'><h3>{title}</h3><table><thead><tr>{cols.map((c) => <th key={c}>{c}</th>)}</tr></thead><tbody>{rows.length ? rows.map((r, i) => <tr key={i}>{cols.map((c) => <td key={c}>{r[c] ?? 'N/A'}</td>)}</tr>) : <tr><td colSpan={cols.length || 1}>N/A</td></tr>}</tbody></table></section>
+function Kpi({ label, value }) { return <div><div className='kpi-label'>{label}</div><div className='kpi-value'>{value || '—'}</div></div> }
+
+function Terminal({ account, settings, journal, orders }) {
+  return <div className='page'>
+    <div className='cards-4'>
+      <Card title='TOTAL BALANCE' value={`$${account.balance || '—'}`} />
+      <Card title='OPEN POSITIONS' value={account.open_positions ?? 0} />
+      <Card title='ACTIVE ORDERS' value={account.active_orders ?? 0} />
+      <Card title='RISK SCORE' value={(settings?.active_profile || 'AGGRESSIVE').toUpperCase()} />
+    </div>
+
+    <div className='two-col'>
+      <section className='panel market'><h3>Market Performance</h3><div className='chart-fake'/><div className='chart-value'>$63,842.12</div></section>
+      <section className='panel active-pos'><h3>Active Position</h3><div className='empty'>NO ACTIVE POSITIONS</div></section>
+    </div>
+
+    <div className='two-col'>
+      <section className='panel feed'><div className='panel-head'>Activity Feed</div><div className='feed-log'>{journal.length ? journal.map((r) => <div key={r.id}>[{(r.ts || '').slice(11, 19)}] {r.message}</div>) : <div>NO EVENTS</div>}</div></section>
+      <section className='panel'><div className='panel-head'>Trade History</div><table><thead><tr><th>TIME</th><th>SYMBOL</th><th>SIDE</th><th>PRICE</th><th>SIZE</th><th>STATUS</th></tr></thead><tbody>{orders.length ? orders.map((o, i) => <tr key={i}><td>—</td><td>{o.symbol}</td><td>{o.side}</td><td>{o.price}</td><td>{o.qty}</td><td>{o.status}</td></tr>) : <tr><td colSpan={6}>NO TRADE RECORDS FOUND</td></tr>}</tbody></table></section>
+    </div>
+  </div>
 }
+
+function History({ signals, journal }) {
+  return <div className='page'>
+    <section className='panel'><div className='panel-head'>Signal History</div><table><thead><tr><th>TIME</th><th>SYMBOL</th><th>DIRECTION</th><th>CONFIDENCE</th><th>STATE</th></tr></thead><tbody>{signals.length ? signals.map((s, i) => <tr key={i}><td>{(s.ts || '').slice(11, 19)}</td><td>{s.symbol}</td><td>{s.side}</td><td>{s.confidence}</td><td>{s.state}</td></tr>) : <tr><td colSpan={5}>NO SIGNALS YET</td></tr>}</tbody></table></section>
+    <section className='panel'><div className='panel-head'>System Log Archive</div><div className='feed-log'>{journal.map((r) => <div key={r.id}>[{(r.ts || '').slice(11, 19)}] [{r.category}] {r.message}</div>)}</div></section>
+  </div>
+}
+
+function Dev({ onAction, consoleOutput, settings }) {
+  const symbol = settings?.symbols?.[0] || 'BTCUSDT'
+  return <div className='page narrow'>
+    <h2>Developer Console</h2><p className='sub'>TESTING & DEBUGGING TOOLS</p>
+    <div className='two-col'>
+      <section className='panel'><div className='panel-head'>Trade Execution</div><button className='btn green' onClick={() => onAction('/api/dev/place-test-trade', { symbol, amount: 100, side: 'BUY' })}>▶ PLACE TEST TRADE ($100 USDT)</button><button className='btn red' onClick={() => onAction('/api/dev/cancel-test-trade', { symbol })}>■ CANCEL TEST TRADE</button></section>
+      <section className='panel'><div className='panel-head'>Connectivity</div><button className='btn blue' onClick={() => onAction('/api/test-connection', { mode: settings?.mode || 'DEMO' })}>⟳ TEST BINANCE CONNECTION</button><button className='btn gray' onClick={() => onAction('/api/dev/clear-logs')}>🗑 CLEAR SYSTEM LOGS</button></section>
+    </div>
+    <section className='panel'><div className='panel-head'>Simulations</div><div className='row'><button className='btn amber' onClick={() => onAction('/api/dev/clear-logs')}>⚠ SIM ERROR</button><button className='btn green' onClick={() => onAction('/api/status')}>SIM SUCCESS</button></div></section>
+    <section className='panel'><div className='panel-head'>Console Output</div><pre className='console'>{consoleOutput || '{\n  "ready": true\n}'}</pre></section>
+  </div>
+}
+
+function Config({ settings, patchSettings, saveSettings }) {
+  if (!settings) return <div className='page'><section className='panel'>Loading...</section></div>
+  const demo = settings.mode === 'DEMO'
+  return <div className='page narrow'>
+    <h2>System Configuration</h2><p className='sub'>BELEVAKU V2.1.0 - OPERATIONAL PARAMETERS</p>
+    <section className='panel'><div className='panel-head'>Exchange Connectivity</div>
+      <div className='grid3'>
+        <div><label>TRADING MODE</label><div className='seg'><button className={demo ? 'active' : ''} onClick={() => patchSettings((s) => { s.mode = 'DEMO'; return s })}>DEMO</button><button className={!demo ? 'active' : ''} onClick={() => patchSettings((s) => { s.mode = 'REAL'; return s })}>REAL</button></div></div>
+        <div><label>MIN 24H VOLUME (MILLIONS USDT)</label><input value={Math.round((settings.min_quote_volume_24h || 0) / 1_000_000)} onChange={(e) => patchSettings((s) => { s.min_quote_volume_24h = Number(e.target.value || 0) * 1_000_000; return s })} /></div>
+      </div>
+    </section>
+
+    <section className='panel'><div className='panel-head'>API Credentials</div>
+      <div className='grid2'>
+        <div><label>REAL API KEY</label><input value={settings.credentials?.REAL?.key || ''} onChange={(e) => patchSettings((s) => { s.credentials.REAL.key = e.target.value; return s })} /></div>
+        <div><label>REAL API SECRET</label><input type='password' value={settings.credentials?.REAL?.secret || ''} onChange={(e) => patchSettings((s) => { s.credentials.REAL.secret = e.target.value; return s })} /></div>
+        <div><label>DEMO API KEY (TESTNET)</label><input value={settings.credentials?.DEMO?.key || ''} onChange={(e) => patchSettings((s) => { s.credentials.DEMO.key = e.target.value; return s })} /></div>
+        <div><label>DEMO API SECRET (TESTNET)</label><input type='password' value={settings.credentials?.DEMO?.secret || ''} onChange={(e) => patchSettings((s) => { s.credentials.DEMO.secret = e.target.value; return s })} /></div>
+      </div>
+    </section>
+
+    <section className='panel'><div className='panel-head'>Strategy Engine</div>
+      <div className='grid2'>
+        <div><label>ALGORITHM</label><select value={settings.strategy?.take_profit_model || 'dynamic_retrace'} onChange={(e) => patchSettings((s) => { s.strategy.take_profit_model = e.target.value; return s })}><option value='dynamic_retrace'>Bollinger Breakout (Volatility)</option><option value='fixed'>Impulse Mean Revert</option></select></div>
+        <div><label>RISK PROFILE</label><div className='seg'><button onClick={() => patchSettings((s) => { s.app_state.active_profile = 'SAFE'; return s })}>SAFE</button><button onClick={() => patchSettings((s) => { s.app_state.active_profile = 'MEDIUM'; return s })}>MEDIUM</button><button className='active' onClick={() => patchSettings((s) => { s.app_state.active_profile = 'AGGRESSIVE'; return s })}>AGGRESSIVE</button></div></div>
+      </div>
+    </section>
+
+    <section className='panel'><div className='panel-head'>Risk Management</div>
+      <div className='grid3'>
+        <div><label>POSITION SIZE (USDT)</label><input value={settings.execution?.max_notional_per_trade || 100} onChange={(e) => patchSettings((s) => { s.risk.max_notional_per_trade = Number(e.target.value || 0); return s })} /></div>
+        <div><label>STOP LOSS (%)</label><input value={settings.app_state?.max_daily_loss_pct || 2} onChange={(e) => patchSettings((s) => { s.app_state.max_daily_loss_pct = Number(e.target.value || 0); return s })} /></div>
+        <div><label>TAKE PROFIT (%)</label><input value={settings.strategy?.retrace_target_pct?.[1] || 0.5} onChange={(e) => patchSettings((s) => { s.strategy.retrace_target_pct = [0.3, Number(e.target.value || 0.5), 0.6]; return s })} /></div>
+      </div>
+    </section>
+
+    <div className='right'><button className='start-btn' onClick={saveSettings}>SAVE CONFIGURATION</button></div>
+  </div>
+}
+
+function Card({ title, value }) { return <section className='panel metric'><div className='kpi-label'>{title}</div><div className='metric-value'>{value}</div></section> }
 
 createRoot(document.getElementById('root')).render(<App />)

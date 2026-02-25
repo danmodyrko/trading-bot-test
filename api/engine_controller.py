@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,8 @@ class EngineController:
         self._config: AppConfig = load_config(self._config_path)
         self._state_path = Path(self._config.storage.app_state_path)
         self._state: AppState = load_app_state(self._state_path)
+        self._credentials_path = DANBOT_ROOT / "data" / "api_credentials.json"
+        self._credentials = self._load_credentials()
         self._events = get_event_bus()
         self._bus = EngineEventBus(history_limit=8000)
         self._running = False
@@ -42,13 +45,34 @@ class EngineController:
         self._adapter: ExchangeAdapter | None = None
         self._db = Database(self._config.storage.sqlite_path)
         self._db.init(DANBOT_ROOT / "danbot" / "storage" / "schema.sql")
+        self._last_test_order: dict[str, Any] | None = None
         self._ensure_runtime_components()
 
     @property
     def bus(self) -> EngineEventBus:
         return self._bus
 
+    def _load_credentials(self) -> dict[str, dict[str, str]]:
+        if not self._credentials_path.exists():
+            return {"DEMO": {"key": "", "secret": ""}, "REAL": {"key": "", "secret": ""}}
+        try:
+            payload = json.loads(self._credentials_path.read_text(encoding="utf-8"))
+            return {
+                "DEMO": {"key": payload.get("DEMO", {}).get("key", ""), "secret": payload.get("DEMO", {}).get("secret", "")},
+                "REAL": {"key": payload.get("REAL", {}).get("key", ""), "secret": payload.get("REAL", {}).get("secret", "")},
+            }
+        except Exception:
+            return {"DEMO": {"key": "", "secret": ""}, "REAL": {"key": "", "secret": ""}}
+
+    def _save_credentials(self) -> None:
+        self._credentials_path.parent.mkdir(parents=True, exist_ok=True)
+        self._credentials_path.write_text(json.dumps(self._credentials, indent=2), encoding="utf-8")
+
     def _env_for_mode(self, mode: Mode) -> tuple[str, str]:
+        profile = self._credentials.get(mode.value, {})
+        key, secret = profile.get("key", ""), profile.get("secret", "")
+        if key and secret:
+            return key, secret
         if mode == Mode.DEMO:
             return os.getenv(self._config.api.demo_key_env, ""), os.getenv(self._config.api.demo_secret_env, "")
         return os.getenv(self._config.api.real_key_env, ""), os.getenv(self._config.api.real_secret_env, "")
@@ -127,62 +151,70 @@ class EngineController:
             "paused": self._entries_paused,
             "mode": self._config.mode,
             "ws_connected": self._ws_connections > 0,
-            "latency": self._last_latency_ms,
-            "uptime": uptime,
+            "ws_clients": self._ws_connections,
+            "latency_ms": self._last_latency_ms,
+            "uptime_seconds": uptime,
+            "connected_exchange": self._config.exchange,
+            "server_time": datetime.now(timezone.utc).isoformat(),
+            "reconnecting": self._last_latency_ms <= 0,
         }
 
     async def get_account(self) -> dict[str, Any]:
-        out = {"balance": "N/A", "equity": "N/A", "daily_pnl": "N/A", "reason": "not available"}
-        if self._adapter:
-            with contextlib.suppress(Exception):
-                overview = await self._adapter.get_account_overview()
-                balance = float(overview.get("balance_usdt", 0))
-                unrealized = float(overview.get("unrealized_pnl", 0))
-                out["balance"] = balance
-                out["equity"] = balance + unrealized
-                out["reason"] = ""
-
-        since = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-        rows = self._db.conn.execute("SELECT pnl FROM trades WHERE ts >= ?", (since,)).fetchall()
-        out["daily_pnl"] = sum(float(r["pnl"] or 0.0) for r in rows) if rows else 0.0
-        return out
+        if not self._adapter:
+            return {"balance": "—", "equity": "—", "daily_pnl": "—", "open_positions": 0, "active_orders": 0}
+        try:
+            overview = await self._adapter.get_account_overview()
+            bal = float(overview.get("balance_usdt", 0.0))
+            eq = bal + float(overview.get("unrealized_pnl", 0.0))
+            return {
+                "balance": f"{bal:.2f}",
+                "equity": f"{eq:.2f}",
+                "daily_pnl": f"{float(overview.get('unrealized_pnl', 0.0)):.2f}",
+                "open_positions": len(await self.get_positions()),
+                "active_orders": len(await self.get_orders()),
+            }
+        except Exception as exc:
+            return {
+                "balance": "—",
+                "equity": "—",
+                "daily_pnl": "—",
+                "open_positions": 0,
+                "active_orders": 0,
+                "reason": str(exc),
+            }
 
     async def get_positions(self) -> list[dict[str, Any]]:
         if not self._adapter:
             return []
-        with contextlib.suppress(Exception):
-            positions = await self._adapter.get_positions()
-            return [{
-                "symbol": p.get("symbol"),
-                "side": "LONG" if float(p.get("positionAmt", 0)) > 0 else "SHORT",
-                "qty": p.get("positionAmt"),
-                "entry_price": p.get("entryPrice"),
-                "mark_price": p.get("markPrice"),
-                "pnl": p.get("unRealizedProfit"),
-            } for p in positions]
-        return []
+        try:
+            payload = await self._adapter.get_positions()
+            return [
+                {
+                    "symbol": p.get("symbol"),
+                    "side": "LONG" if float(p.get("positionAmt", 0)) > 0 else "SHORT",
+                    "qty": p.get("positionAmt"),
+                    "entry_price": p.get("entryPrice"),
+                    "mark_price": p.get("markPrice"),
+                    "pnl": p.get("unRealizedProfit"),
+                }
+                for p in payload
+            ]
+        except Exception:
+            return []
 
     async def get_orders(self) -> list[dict[str, Any]]:
         if not self._adapter:
             return []
-        with contextlib.suppress(Exception):
-            payload = await self._adapter._signed_get("/fapi/v1/openOrders")
+        try:
+            payload = await self._adapter.client.get("/fapi/v1/openOrders", signed=True)
             if isinstance(payload, list):
-                return [{
-                    "id": o.get("orderId"),
-                    "symbol": o.get("symbol"),
-                    "type": o.get("type"),
-                    "side": o.get("side"),
-                    "qty": o.get("origQty"),
-                    "price": o.get("price"),
-                    "status": o.get("status"),
-                } for o in payload]
+                return [{"id": o.get("orderId"), "symbol": o.get("symbol"), "type": o.get("type"), "side": o.get("side"), "qty": o.get("origQty"), "price": o.get("price"), "status": o.get("status")} for o in payload]
+        except Exception:
+            return []
         return []
 
     async def get_signals(self, limit: int = 100) -> list[dict[str, Any]]:
-        rows = self._db.conn.execute(
-            "SELECT ts,symbol,state,confidence,side,reasons FROM signals ORDER BY id DESC LIMIT ?", (limit,)
-        ).fetchall()
+        rows = self._db.conn.execute("SELECT ts,symbol,state,confidence,side,reasons FROM signals ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
 
     async def get_risk(self) -> dict[str, Any]:
@@ -198,9 +230,14 @@ class EngineController:
         payload = self._config.model_dump(mode="json")
         payload["app_state"] = self._state.model_dump(mode="json")
         payload["active_profile"] = detect_profile(self._state)
+        payload["credentials"] = {
+            "DEMO": {"key": self._credentials.get("DEMO", {}).get("key", ""), "secret": self._credentials.get("DEMO", {}).get("secret", "")},
+            "REAL": {"key": self._credentials.get("REAL", {}).get("key", ""), "secret": self._credentials.get("REAL", {}).get("secret", "")},
+        }
         return payload
 
     async def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        credentials = payload.pop("credentials", None)
         merged = self._config.model_dump(mode="python")
         app_state_patch = payload.pop("app_state", {}) if isinstance(payload.get("app_state", {}), dict) else {}
         for key, value in payload.items():
@@ -215,6 +252,15 @@ class EngineController:
             state_dump.update(app_state_patch)
             self._state = AppState.model_validate(state_dump)
             save_app_state(self._state_path, self._state)
+        if isinstance(credentials, dict):
+            for mode in ["DEMO", "REAL"]:
+                item = credentials.get(mode, {})
+                if isinstance(item, dict):
+                    self._credentials[mode] = {
+                        "key": str(item.get("key", self._credentials.get(mode, {}).get("key", ""))),
+                        "secret": str(item.get("secret", self._credentials.get(mode, {}).get("secret", ""))),
+                    }
+            self._save_credentials()
         self._ensure_runtime_components()
         self._events.publish(EventRecord(action="SETTINGS_UPDATE", message="settings updated", category="SYSTEM", details={"keys": list(payload.keys())}))
         return await self.get_settings()
@@ -234,11 +280,51 @@ class EngineController:
         key = key if key is not None else self._env_for_mode(target_mode)[0]
         secret = secret if secret is not None else self._env_for_mode(target_mode)[1]
         adapter = ExchangeAdapter(mode=target_mode, api_key=key, api_secret=secret, time_sync=self._time_sync)
+        checks: dict[str, Any] = {"mode": target_mode.value, "api_key_present": bool(key), "api_secret_present": bool(secret)}
         try:
-            latency = int(await adapter.ping_latency_ms())
-            return {"ok": True, "mode": target_mode.value, "latency_ms": latency}
+            checks["ping_latency_ms"] = int(await adapter.ping_latency_ms())
+            time_payload = await adapter.client.get("/fapi/v1/time")
+            checks["server_time"] = time_payload.get("serverTime")
+            if key and secret:
+                account = await adapter.get_account_overview()
+                checks["account"] = {
+                    "balance_usdt": account.get("balance_usdt", 0),
+                    "available_usdt": account.get("available_usdt", 0),
+                }
+            return {"ok": True, "checks": checks}
         except Exception as exc:
-            return {"ok": False, "mode": target_mode.value, "reason": str(exc)}
+            return {"ok": False, "checks": checks, "reason": str(exc)}
+
+    async def place_test_trade(self, symbol: str, quote_value_usdt: float = 100.0, side: str = "BUY") -> dict[str, Any]:
+        if Mode(self._config.mode) != Mode.DEMO:
+            return {"ok": False, "reason": "Test trade is allowed only in DEMO mode."}
+        if not self._adapter:
+            return {"ok": False, "reason": "Adapter is not initialized."}
+        result = await self._adapter.place_test_trade(symbol=symbol, quote_value_usdt=quote_value_usdt, side=side)
+        self._last_test_order = result.get("order")
+        await self._bus.publish(level="INFO", category="ORDER", message="Test trade placed", symbol=symbol, payload=result)
+        return result
+
+    async def cancel_test_trade(self, symbol: str | None = None) -> dict[str, Any]:
+        if not self._adapter:
+            return {"ok": False, "reason": "Adapter is not initialized."}
+        if not self._last_test_order:
+            return {"ok": False, "reason": "No test order tracked in current session."}
+        order = self._last_test_order
+        params = {"symbol": symbol or order.get("symbol"), "orderId": order.get("orderId")}
+        try:
+            payload = await self._adapter.client.delete("/fapi/v1/order", params=params, signed=True)
+            await self._bus.publish(level="WARNING", category="ORDER", message="Test trade cancel requested", symbol=params["symbol"], payload=payload)
+            return {"ok": True, "cancel": payload}
+        except Exception as exc:
+            return {"ok": False, "reason": str(exc), "params": params}
+
+    async def clear_system_logs(self) -> dict[str, Any]:
+        self._db.conn.execute("DELETE FROM lifelog")
+        self._db.conn.commit()
+        self._bus.clear_history()
+        await self._bus.publish(level="WARNING", category="SYSTEM", message="System logs cleared from UI")
+        return {"ok": True}
 
     async def get_journal(self, page: int, limit: int) -> dict[str, Any]:
         offset = max(page - 1, 0) * limit
@@ -265,8 +351,10 @@ class EngineController:
         self._last_latency_ms = 0
 
     async def _bridge_danbot_events(self) -> None:
+        last_ws_event_at = datetime.now(timezone.utc)
         while True:
-            for event in self._events.drain_live_events(limit=250):
+            drained = self._events.drain_live_events(limit=250)
+            for event in drained:
                 await self._bus.publish(
                     level=event.severity,
                     category=event.category,
@@ -274,6 +362,10 @@ class EngineController:
                     symbol=event.symbol,
                     payload=event.details,
                 )
+                last_ws_event_at = datetime.now(timezone.utc)
+            if datetime.now(timezone.utc) - last_ws_event_at > timedelta(seconds=8):
+                await self._bus.publish(level="WARNING", category="WS", message="Market stream stale (>8s), reconnect monitor active")
+                last_ws_event_at = datetime.now(timezone.utc)
             await asyncio.sleep(0.25)
 
     def _write_config_toml(self, path: Path, config_data: dict[str, Any]) -> None:

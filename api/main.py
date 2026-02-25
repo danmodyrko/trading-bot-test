@@ -126,6 +126,24 @@ async def journal(page: int = Query(default=1, ge=1), limit: int = Query(default
     return await controller.get_journal(page=page, limit=limit)
 
 
+@app.post("/api/dev/place-test-trade", dependencies=[Depends(require_rest_token)])
+async def dev_place_test_trade(payload: dict):
+    symbol = payload.get("symbol", "BTCUSDT")
+    amount = float(payload.get("amount", 100))
+    side = payload.get("side", "BUY")
+    return await controller.place_test_trade(symbol=symbol, quote_value_usdt=amount, side=side)
+
+
+@app.post("/api/dev/cancel-test-trade", dependencies=[Depends(require_rest_token)])
+async def dev_cancel_test_trade(payload: dict):
+    return await controller.cancel_test_trade(symbol=payload.get("symbol"))
+
+
+@app.post("/api/dev/clear-logs", dependencies=[Depends(require_rest_token)])
+async def dev_clear_logs():
+    return await controller.clear_system_logs()
+
+
 @app.websocket("/ws/events")
 async def ws_events(websocket: WebSocket):
     await websocket.accept()

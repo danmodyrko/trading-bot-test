@@ -95,3 +95,20 @@ class BinanceRestClient:
                     return await resp.json(content_type=None)
 
         return await _call()
+
+    async def delete(self, path: str, params: dict[str, Any] | None = None, signed: bool = False) -> Any:
+        raw_params = params or {}
+        payload = dict(raw_params)
+        if signed:
+            payload = self._signed_params(raw_params)
+        headers = {"X-MBX-APIKEY": self.api_key} if self.api_key else {}
+
+        async def _call() -> Any:
+            async with aiohttp.ClientSession(base_url=self.base_url, headers=headers) as session:
+                async with session.delete(path, params=payload, timeout=10) as resp:
+                    body = await resp.text()
+                    if resp.status >= 400:
+                        raise ClientResponseError(resp.request_info, tuple(resp.history), status=resp.status, message=body, headers=resp.headers)
+                    return await resp.json(content_type=None)
+
+        return await _call()

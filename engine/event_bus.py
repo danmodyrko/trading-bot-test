@@ -57,3 +57,6 @@ class EngineEventBus:
 
     def snapshot(self, limit: int = 200) -> list[dict[str, Any]]:
         return list(self._history)[-limit:]
+
+    def clear_history(self) -> None:
+        self._history.clear()
